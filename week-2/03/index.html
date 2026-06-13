@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>React 카운터 예제</title>
+
+  <!-- Tailwind CSS: 유틸리티 클래스로 스타일을 쉽게 적용할 수 있게 해줍니다 -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React: UI를 만드는 라이브러리 -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <!-- ReactDOM: React 컴포넌트를 실제 HTML에 그려주는 라이브러리 -->
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <!-- Babel: 브라우저가 JSX 문법을 이해할 수 있게 변환해줍니다 -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-100">
+  <!-- React가 화면을 그릴 위치입니다 -->
+  <div id="root"></div>
+
+  <!-- JSX를 사용하려면 type을 "text/babel"로 지정해야 합니다 -->
+  <script type="text/babel">
+    // ========================================
+    // React Hooks 가져오기
+    // useState: 컴포넌트 안에서 변하는 값(상태)을 관리하는 도구입니다
+    // ========================================
+    const { useState } = React;
+
+    // ========================================
+    // 🚀 Counter 컴포넌트
+    // 컴포넌트는 화면의 한 조각을 만드는 함수입니다.
+    // 항상 대문자로 시작하며, JSX(HTML처럼 생긴 코드)를 반환합니다.
+    // ========================================
+    function Counter() {
+      // count 라는 상태를 만듭니다. 초기값은 0 입니다.
+      // count        -> 현재 값
+      // setCount(...) -> 값을 바꾸는 함수 (이 함수를 써야 화면이 다시 그려집니다)
+      const [count, setCount] = useState(0);
+
+      // 1 증가시키는 함수
+      const increase = () => setCount(count + 1);
+
+      // 1 감소시키는 함수
+      const decrease = () => setCount(count - 1);
+
+      // 0으로 되돌리는 함수
+      const reset = () => setCount(0);
+
+      // 컴포넌트가 화면에 그릴 내용(JSX)을 반환합니다
+      return (
+        <div className="min-h-screen flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-lg p-8 w-full max-w-sm text-center">
+            <h1 className="text-2xl font-bold text-slate-800 mb-2">
+              간단한 카운터
+            </h1>
+            <p className="text-slate-500 mb-6 text-sm">
+              버튼을 눌러 숫자를 바꿔보세요
+            </p>
+
+            {/* 현재 count 값을 화면에 보여줍니다. {중괄호} 안에는 JS 값을 넣습니다 */}
+            <div className="text-6xl font-extrabold text-blue-600 mb-8">
+              {count}
+            </div>
+
+            {/* 버튼들: onClick 에 클릭 시 실행할 함수를 연결합니다 */}
+            <div className="flex gap-3 justify-center">
+              <button
+                onClick={decrease}
+                className="px-5 py-3 rounded-lg bg-slate-200 text-slate-700 font-semibold hover:bg-slate-300 active:scale-95 transition"
+              >
+                － 감소
+              </button>
+
+              <button
+                onClick={increase}
+                className="px-5 py-3 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 active:scale-95 transition"
+              >
+                ＋ 증가
+              </button>
+            </div>
+
+            {/* 초기화 버튼 */}
+            <button
+              onClick={reset}
+              className="mt-4 text-sm text-slate-400 hover:text-slate-600 underline"
+            >
+              0으로 초기화
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // ========================================
+    // 렌더링: Counter 컴포넌트를 #root 안에 그립니다
+    // ========================================
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<Counter />);
+  </script>
+</body>
+</html>

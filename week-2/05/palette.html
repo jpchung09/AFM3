@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>색상 팔레트 생성기</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fade-in-up { animation: fadeInUp 0.4s ease both; }
+
+    @keyframes pop {
+      0%   { transform: scale(0.85); opacity: 0; }
+      60%  { transform: scale(1.05); opacity: 1; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    .animate-pop { animation: pop 0.25s ease both; }
+
+    .swatch-hover { transition: transform 0.18s ease, box-shadow 0.18s ease; }
+    .swatch-hover:hover { transform: translateY(-4px); box-shadow: 0 12px 24px -8px rgba(0,0,0,0.35); }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useMemo, useCallback, useEffect } = React;
+
+    // ========================================
+    // 🎨 Color conversion helpers (plain JS)
+    // ========================================
+
+    // Clamp a number to a range
+    const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
+
+    // Normalize/validate a hex string. Accepts with or without "#",
+    // 3-digit shorthand or 6-digit. Returns "#rrggbb" (lowercase) or null.
+    function normalizeHex(input) {
+      if (typeof input !== "string") return null;
+      let h = input.trim().replace(/^#/, "").toLowerCase();
+      if (/^[0-9a-f]{3}$/.test(h)) {
+        h = h.split("").map((c) => c + c).join("");
+      }
+      if (/^[0-9a-f]{6}$/.test(h)) {
+        return "#" + h;
+      }
+      return null;
+    }
+
+    function isValidHex(input) {
+      return normalizeHex(input) !== null;
+    }
+
+    // hex -> {r,g,b} in 0..255. Assumes a normalized hex.
+    function hexToRgb(hex) {
+      const h = normalizeHex(hex);
+      if (!h) return { r: 0, g: 0, b: 0 };
+      return {
+        r: parseInt(h.slice(1, 3), 16),
+        g: parseInt(h.slice(3, 5), 16),
+        b: parseInt(h.slice(5, 7), 16),
+      };
+    }
+
+    // {r,g,b} -> "#rrggbb"
+    function rgbToHex(r, g, b) {
+      const toHex = (v) => {
+        const c = clamp(Math.round(v), 0, 255).toString(16);
+        return c.length === 1 ? "0" + c : c;
+      };
+      return "#" + toHex(r) + toHex(g) + toHex(b);
+    }
+
+    // {r,g,b} (0..255) -> {h (0..360), s (0..100), l (0..100)}
+    function rgbToHsl(r, g, b) {
+      r /= 255; g /= 255; b /= 255;
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      let h = 0, s = 0;
+      const l = (max + min) / 2;
+      const d = max - min;
+      if (d !== 0) {
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        switch (max) {
+          case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+          case g: h = (b - r) / d + 2; break;
+          default: h = (r - g) / d + 4; break;
+        }
+        h *= 60;
+      }
+      return { h: h, s: s * 100, l: l * 100 };
+    }
+
+    // {h,s,l} -> {r,g,b} (0..255)
+    function hslToRgb(h, s, l) {
+      h = ((h % 360) + 360) % 360;
+      s = clamp(s, 0, 100) / 100;
+      l = clamp(l, 0, 100) / 100;
+      const c = (1 - Math.abs(2 * l - 1)) * s;
+      const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+      const m = l - c / 2;
+      let r1 = 0, g1 = 0, b1 = 0;
+      if (h < 60)       { r1 = c; g1 = x; b1 = 0; }
+      else if (h < 120) { r1 = x; g1 = c; b1 = 0; }
+      else if (h < 180) { r1 = 0; g1 = c; b1 = x; }
+      else if (h < 240) { r1 = 0; g1 = x; b1 = c; }
+      else if (h < 300) { r1 = x; g1 = 0; b1 = c; }
+      else              { r1 = c; g1 = 0; b1 = x; }
+      return {
+        r: (r1 + m) * 255,
+        g: (g1 + m) * 255,
+        b: (b1 + m) * 255,
+      };
+    }
+
+    // Convenience converters
+    function hexToHsl(hex) {
+      const { r, g, b } = hexToRgb(hex);
+      return rgbToHsl(r, g, b);
+    }
+    function hslToHex(h, s, l) {
+      const { r, g, b } = hslToRgb(h, s, l);
+      return rgbToHex(r, g, b);
+    }
+
+    // Relative luminance (0..1) to decide black/white text.
+    function luminance(hex) {
+      const { r, g, b } = hexToRgb(hex);
+      const f = (v) => {
+        v /= 255;
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      };
+      return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+    }
+
+    function readableTextColor(hex) {
+      return luminance(hex) > 0.45 ? "#111827" : "#ffffff";
+    }
+
+    function rgbString(hex) {
+      const { r, g, b } = hexToRgb(hex);
+      return `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`;
+    }
+
+    // ========================================
+    // 🧮 Palette generation
+    // ========================================
+
+    function buildPalettes(baseHex) {
+      const { h, s, l } = hexToHsl(baseHex);
+
+      // 명도 변화 (Shades & Tints): vary lightness from dark to light.
+      const shades = [12, 25, 38, 50, 62, 75, 88].map((L) => hslToHex(h, s, L));
+
+      // 보색 (Complementary): base + hue+180.
+      const complementary = [baseHex, hslToHex(h + 180, s, l)];
+
+      // 유사색 (Analogous): -30, base, +30.
+      const analogous = [
+        hslToHex(h - 30, s, l),
+        baseHex,
+        hslToHex(h + 30, s, l),
+      ];
+
+      // 3색 조화 (Triadic): base, +120, +240.
+      const triadic = [
+        baseHex,
+        hslToHex(h + 120, s, l),
+        hslToHex(h + 240, s, l),
+      ];
+
+      return [
+        {
+          key: "shades",
+          title: "명도 변화",
+          subtitle: "Shades & Tints",
+          desc: "기준 색의 밝기를 어둡게~밝게 단계별로 변화시킨 팔레트입니다.",
+          colors: shades,
+        },
+        {
+          key: "complementary",
+          title: "보색",
+          subtitle: "Complementary",
+          desc: "색상환에서 정반대(+180°)에 위치한 색으로, 강한 대비를 만듭니다.",
+          colors: complementary,
+        },
+        {
+          key: "analogous",
+          title: "유사색",
+          subtitle: "Analogous",
+          desc: "기준 색 주변(±30°)의 자연스럽게 어울리는 색들입니다.",
+          colors: analogous,
+        },
+        {
+          key: "triadic",
+          title: "3색 조화",
+          subtitle: "Triadic",
+          desc: "색상환을 3등분(+120°, +240°)한 균형 잡힌 조화입니다.",
+          colors: triadic,
+        },
+      ];
+    }
+
+    // ========================================
+    // 🎨 Design System Components
+    // ========================================
+
+    function Button({ variant = "primary", size = "md", className = "", children, ...props }) {
+      const base =
+        "inline-flex items-center justify-center font-medium rounded-xl transition focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed";
+      const variants = {
+        primary: "bg-indigo-600 text-white hover:bg-indigo-700 focus:ring-indigo-500",
+        secondary: "bg-white text-slate-700 border border-slate-300 hover:bg-slate-100 focus:ring-slate-400",
+        ghost: "bg-transparent text-slate-600 hover:bg-slate-100 focus:ring-slate-300",
+      };
+      const sizes = {
+        sm: "px-3 py-1.5 text-sm",
+        md: "px-4 py-2 text-sm",
+        lg: "px-5 py-2.5 text-base",
+      };
+      return (
+        <button className={`${base} ${variants[variant]} ${sizes[size]} ${className}`} {...props}>
+          {children}
+        </button>
+      );
+    }
+
+    function Card({ className = "", children }) {
+      return (
+        <div className={`bg-white rounded-2xl shadow-sm border border-slate-100 ${className}`}>
+          {children}
+        </div>
+      );
+    }
+
+    // ========================================
+    // 🧩 Swatch component
+    // ========================================
+
+    function Swatch({ hex, onCopy, copied }) {
+      const textColor = readableTextColor(hex);
+      return (
+        <button
+          type="button"
+          onClick={() => onCopy(hex)}
+          title="클릭하여 HEX 복사"
+          className="swatch-hover animate-fade-in-up relative flex flex-col justify-end w-full h-28 sm:h-32 rounded-xl border border-black/5 overflow-hidden focus:outline-none focus:ring-2 focus:ring-indigo-400"
+          style={{ backgroundColor: hex }}
+          aria-label={`${hex} 색상 복사`}
+        >
+          {copied && (
+            <span
+              className="animate-pop absolute top-2 right-2 text-xs font-semibold px-2 py-0.5 rounded-full bg-black/70 text-white"
+            >
+              복사됨!
+            </span>
+          )}
+          <div className="w-full px-2.5 py-2 text-left backdrop-blur-[1px]">
+            <div className="text-sm font-bold tracking-wide uppercase" style={{ color: textColor }}>
+              {hex}
+            </div>
+            <div className="text-[11px] font-medium opacity-80" style={{ color: textColor }}>
+              {rgbString(hex)}
+            </div>
+          </div>
+        </button>
+      );
+    }
+
+    // ========================================
+    // 📄 Palette section
+    // ========================================
+
+    function PaletteSection({ section, copiedHex, onCopy }) {
+      return (
+        <Card className="p-5 sm:p-6 animate-fade-in-up">
+          <div className="mb-4">
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <h2 className="text-lg font-bold text-slate-800">{section.title}</h2>
+              <span className="text-xs font-semibold uppercase tracking-wider text-indigo-500">
+                {section.subtitle}
+              </span>
+            </div>
+            <p className="text-sm text-slate-500 mt-1">{section.desc}</p>
+          </div>
+          <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7">
+            {section.colors.map((hex, i) => (
+              <Swatch
+                key={`${section.key}-${i}-${hex}`}
+                hex={hex}
+                copied={copiedHex === hex}
+                onCopy={onCopy}
+              />
+            ))}
+          </div>
+        </Card>
+      );
+    }
+
+    // ========================================
+    // 🚀 App
+    // ========================================
+
+    const DEFAULT_COLOR = "#3498db";
+
+    function App() {
+      const [baseHex, setBaseHex] = useState(DEFAULT_COLOR);
+      const [textValue, setTextValue] = useState(DEFAULT_COLOR);
+      const [error, setError] = useState("");
+      const [copiedHex, setCopiedHex] = useState(null);
+
+      // Keep text input in sync when color picker changes the base.
+      const applyValidColor = useCallback((raw) => {
+        const norm = normalizeHex(raw);
+        if (norm) {
+          setBaseHex(norm);
+          setError("");
+        }
+        return norm;
+      }, []);
+
+      // Color picker change -> always valid hex
+      const handlePickerChange = (e) => {
+        const v = e.target.value; // "#rrggbb"
+        setTextValue(v);
+        applyValidColor(v);
+      };
+
+      // Text input change -> update text immediately, validate live
+      const handleTextChange = (e) => {
+        const v = e.target.value;
+        setTextValue(v);
+        if (v.trim() === "") {
+          setError("색상 코드를 입력해 주세요. 예: #3498db");
+          return;
+        }
+        if (isValidHex(v)) {
+          applyValidColor(v);
+        } else {
+          setError("올바른 HEX 색상 코드가 아니에요. 예: #3498db 또는 39b (3자리도 가능)");
+        }
+      };
+
+      const handleReset = () => {
+        setBaseHex(DEFAULT_COLOR);
+        setTextValue(DEFAULT_COLOR);
+        setError("");
+        setCopiedHex(null);
+      };
+
+      const handleCopy = useCallback(async (hex) => {
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(hex);
+          } else {
+            // Fallback for non-secure contexts
+            const ta = document.createElement("textarea");
+            ta.value = hex;
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+          }
+          setCopiedHex(hex);
+        } catch (err) {
+          setCopiedHex(hex); // still show confirmation; copy may have partially worked
+        }
+      }, []);
+
+      // Auto-clear the "복사됨!" badge.
+      useEffect(() => {
+        if (!copiedHex) return;
+        const t = setTimeout(() => setCopiedHex(null), 1200);
+        return () => clearTimeout(t);
+      }, [copiedHex]);
+
+      const palettes = useMemo(() => buildPalettes(baseHex), [baseHex]);
+      const baseHsl = useMemo(() => hexToHsl(baseHex), [baseHex]);
+      const baseTextColor = readableTextColor(baseHex);
+
+      return (
+        <div className="min-h-screen">
+          <div className="max-w-5xl mx-auto px-4 py-8 sm:py-12">
+            {/* Header */}
+            <header className="text-center mb-8">
+              <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-slate-900">
+                🎨 색상 팔레트 생성기
+              </h1>
+              <p className="text-slate-500 mt-2 text-sm sm:text-base">
+                기준 색 하나로 명도 변화 · 보색 · 유사색 · 3색 조화 팔레트를 만들어 보세요.
+              </p>
+            </header>
+
+            {/* Input panel */}
+            <Card className="p-5 sm:p-6 mb-8 animate-fade-in-up">
+              <div className="grid gap-5 md:grid-cols-[auto,1fr,auto] md:items-end">
+                {/* Picker + preview */}
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-2">
+                    기준 색상
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="color"
+                      value={baseHex}
+                      onChange={handlePickerChange}
+                      className="h-12 w-14 rounded-lg border border-slate-300 cursor-pointer bg-white p-1"
+                      aria-label="색상 선택기"
+                    />
+                    <div
+                      className="hidden sm:flex flex-col justify-center rounded-lg px-4 h-12 border border-black/5"
+                      style={{ backgroundColor: baseHex, color: baseTextColor }}
+                    >
+                      <span className="text-xs font-bold uppercase">{baseHex}</span>
+                      <span className="text-[11px] opacity-80">
+                        H {Math.round(baseHsl.h)}° · S {Math.round(baseHsl.s)}% · L {Math.round(baseHsl.l)}%
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Hex text input */}
+                <div>
+                  <label htmlFor="hexInput" className="block text-sm font-semibold text-slate-700 mb-2">
+                    HEX 코드
+                  </label>
+                  <input
+                    id="hexInput"
+                    type="text"
+                    value={textValue}
+                    onChange={handleTextChange}
+                    placeholder="예: #3498db"
+                    spellCheck={false}
+                    className={`w-full rounded-xl border px-4 py-2.5 text-sm font-mono uppercase tracking-wide focus:outline-none focus:ring-2 ${
+                      error
+                        ? "border-rose-400 focus:ring-rose-300"
+                        : "border-slate-300 focus:ring-indigo-300"
+                    }`}
+                    aria-invalid={!!error}
+                  />
+                  {error ? (
+                    <p className="text-xs text-rose-500 mt-1.5">{error}</p>
+                  ) : (
+                    <p className="text-xs text-slate-400 mt-1.5">
+                      # 없이 입력해도 되고, 3자리 단축형(예: 39b)도 인식해요.
+                    </p>
+                  )}
+                </div>
+
+                {/* Reset */}
+                <div className="md:pb-[2px]">
+                  <Button variant="secondary" size="lg" onClick={handleReset} className="w-full md:w-auto">
+                    ↺ 초기화
+                  </Button>
+                </div>
+              </div>
+            </Card>
+
+            {/* Palettes */}
+            <main className="space-y-6">
+              {palettes.map((section) => (
+                <PaletteSection
+                  key={section.key}
+                  section={section}
+                  copiedHex={copiedHex}
+                  onCopy={handleCopy}
+                />
+              ))}
+            </main>
+
+            <footer className="text-center text-xs text-slate-400 mt-10">
+              스와치를 클릭하면 HEX 코드가 클립보드에 복사됩니다.
+            </footer>
+          </div>
+        </div>
+      );
+    }
+
+    // ========================================
+    // Rendering
+    // ========================================
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>

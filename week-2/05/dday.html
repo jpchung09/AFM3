@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>D-day 카운터</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    /* 배경 그라데이션 애니메이션 */
+    @keyframes gradientShift {
+      0% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+    .animated-bg {
+      background: linear-gradient(135deg, #e0e7ff, #f0f9ff, #ecfeff, #faf5ff);
+      background-size: 400% 400%;
+      animation: gradientShift 15s ease infinite;
+    }
+    /* 결과 등장 애니메이션 */
+    @keyframes popIn {
+      0% { opacity: 0; transform: scale(0.85) translateY(10px); }
+      60% { opacity: 1; transform: scale(1.03) translateY(0); }
+      100% { opacity: 1; transform: scale(1) translateY(0); }
+    }
+    .animate-pop {
+      animation: popIn 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    /* D-DAY 강조 펄스 */
+    @keyframes pulseGlow {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.04); }
+    }
+    .animate-pulse-glow {
+      animation: pulseGlow 1.8s ease-in-out infinite;
+    }
+  </style>
+</head>
+<body class="animated-bg min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ========================================
+    // React Hooks
+    // ========================================
+    const { useState, useCallback } = React;
+
+    // ========================================
+    // 🎨 Design System Components
+    // ========================================
+    function Button({ variant = "primary", size = "md", className = "", children, ...props }) {
+      const base = "inline-flex items-center justify-center font-semibold rounded-xl transition-all duration-200 focus:outline-none focus:ring-4 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95";
+      const variants = {
+        primary: "bg-indigo-600 text-white hover:bg-indigo-700 focus:ring-indigo-200 shadow-lg shadow-indigo-200",
+        secondary: "bg-white text-gray-700 border border-gray-300 hover:bg-gray-50 focus:ring-gray-200",
+      };
+      const sizes = {
+        sm: "px-3 py-1.5 text-sm",
+        md: "px-5 py-2.5 text-base",
+        lg: "px-6 py-3 text-lg",
+      };
+      return (
+        <button className={`${base} ${variants[variant]} ${sizes[size]} ${className}`} {...props}>
+          {children}
+        </button>
+      );
+    }
+
+    function Input({ label, error, className = "", ...props }) {
+      return (
+        <div className="w-full">
+          {label && <label className="block text-sm font-medium text-gray-700 mb-1.5">{label}</label>}
+          <input
+            className={`w-full px-4 py-3 rounded-xl border bg-white text-gray-900 placeholder-gray-400 transition-all duration-200 focus:outline-none focus:ring-4 ${
+              error
+                ? "border-red-400 focus:ring-red-100"
+                : "border-gray-300 focus:border-indigo-500 focus:ring-indigo-100"
+            } ${className}`}
+            {...props}
+          />
+          {error && <p className="mt-1.5 text-sm text-red-500">{error}</p>}
+        </div>
+      );
+    }
+
+    function Card({ className = "", children }) {
+      return (
+        <div className={`bg-white/90 backdrop-blur-sm rounded-3xl shadow-2xl shadow-indigo-100 p-6 sm:p-8 ${className}`}>
+          {children}
+        </div>
+      );
+    }
+
+    // ========================================
+    // 🧮 D-day 계산 로직
+    // ========================================
+    // 시간 부분을 0으로 만들어 자정 기준 날짜 차이(달력 일수)를 계산한다.
+    function calcDday(targetDateStr) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      // "YYYY-MM-DD" 문자열을 로컬 자정 기준 Date로 파싱
+      const [y, m, d] = targetDateStr.split("-").map(Number);
+      const target = new Date(y, m - 1, d);
+      target.setHours(0, 0, 0, 0);
+
+      const MS_PER_DAY = 1000 * 60 * 60 * 24;
+      // target - today 가 양수면 미래(남음), 음수면 과거(지남)
+      const diffDays = Math.round((target.getTime() - today.getTime()) / MS_PER_DAY);
+      return diffDays;
+    }
+
+    // ========================================
+    // 📄 Page Component
+    // ========================================
+    function DdayCounter() {
+      const [label, setLabel] = useState("");
+      const [date, setDate] = useState("");
+      const [error, setError] = useState("");
+      const [result, setResult] = useState(null); // { diff, label }
+
+      const handleCalculate = useCallback(() => {
+        if (!date) {
+          setError("목표 날짜를 선택해 주세요 📅");
+          setResult(null);
+          return;
+        }
+        setError("");
+        const diff = calcDday(date);
+        setResult({ diff, label: label.trim(), date });
+      }, [date, label]);
+
+      const handleReset = useCallback(() => {
+        setLabel("");
+        setDate("");
+        setError("");
+        setResult(null);
+      }, []);
+
+      const handleKeyDown = useCallback((e) => {
+        if (e.key === "Enter") {
+          handleCalculate();
+        }
+      }, [handleCalculate]);
+
+      // 결과 상태에 따른 표시 정보 계산
+      let display = null;
+      if (result) {
+        const { diff } = result;
+        if (diff > 0) {
+          display = {
+            badge: `D-${diff}`,
+            message: `${diff}일 남았습니다`,
+            color: "text-blue-600",
+            chip: "bg-blue-50 text-blue-600",
+            sub: "다가오는 날까지",
+            pulse: false,
+          };
+        } else if (diff === 0) {
+          display = {
+            badge: "D-DAY",
+            message: "🎉 오늘입니다!",
+            color: "text-amber-500",
+            chip: "bg-amber-50 text-amber-600",
+            sub: "바로 오늘",
+            pulse: true,
+          };
+        } else {
+          const past = Math.abs(diff);
+          display = {
+            badge: `D+${past}`,
+            message: `${past}일 지났습니다`,
+            color: "text-rose-600",
+            chip: "bg-rose-50 text-rose-600",
+            sub: "지나간 날로부터",
+            pulse: false,
+          };
+        }
+      }
+
+      // 날짜를 보기 좋게 포맷
+      const formatKDate = (str) => {
+        if (!str) return "";
+        const [y, m, d] = str.split("-").map(Number);
+        const dt = new Date(y, m - 1, d);
+        const days = ["일", "월", "화", "수", "목", "금", "토"];
+        return `${y}년 ${m}월 ${d}일 (${days[dt.getDay()]})`;
+      };
+
+      return (
+        <div className="min-h-screen flex items-center justify-center px-4 py-10">
+          <div className="w-full max-w-md">
+            {/* 헤더 */}
+            <div className="text-center mb-6">
+              <h1 className="text-3xl sm:text-4xl font-extrabold text-gray-800 tracking-tight">
+                ⏳ D-day 카운터
+              </h1>
+              <p className="mt-2 text-gray-500 text-sm sm:text-base">
+                목표 날짜까지 남은 날을 세어 보세요
+              </p>
+            </div>
+
+            <Card>
+              {/* 입력 영역 */}
+              <div className="space-y-4">
+                <Input
+                  label="이벤트 이름 (선택)"
+                  type="text"
+                  placeholder='예: 시험일, 기념일'
+                  value={label}
+                  maxLength={30}
+                  onChange={(e) => setLabel(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                />
+                <Input
+                  label="목표 날짜"
+                  type="date"
+                  value={date}
+                  onChange={(e) => { setDate(e.target.value); setError(""); }}
+                  onKeyDown={handleKeyDown}
+                  error={error}
+                />
+
+                <div className="flex gap-3 pt-1">
+                  <Button size="lg" className="flex-1" onClick={handleCalculate}>
+                    계산하기
+                  </Button>
+                  <Button variant="secondary" size="lg" onClick={handleReset}>
+                    초기화
+                  </Button>
+                </div>
+              </div>
+
+              {/* 결과 영역 */}
+              {display && (
+                <div key={result.badge + result.date} className="animate-pop mt-7 pt-7 border-t border-gray-100 text-center">
+                  {result.label && (
+                    <p className="text-lg font-semibold text-gray-700 mb-1">
+                      {result.label}
+                    </p>
+                  )}
+                  <p className="text-sm text-gray-400 mb-3">
+                    {display.sub} · {formatKDate(result.date)}
+                  </p>
+
+                  <div className={`${display.color} ${display.pulse ? "animate-pulse-glow" : ""}`}>
+                    <span className="block text-6xl sm:text-7xl font-black tracking-tighter leading-none">
+                      {display.badge}
+                    </span>
+                  </div>
+
+                  <span className={`inline-block mt-4 px-4 py-1.5 rounded-full text-sm font-semibold ${display.chip}`}>
+                    {display.message}
+                  </span>
+                </div>
+              )}
+            </Card>
+
+            <p className="text-center text-xs text-gray-400 mt-6">
+              오늘 날짜는 브라우저 시간을 기준으로 자동 계산됩니다.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // ========================================
+    // 🚀 App & Rendering
+    // ========================================
+    function App() {
+      return <DdayCounter />;
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
