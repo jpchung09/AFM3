@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>더치페이 계산기</title>
+
+  <!-- Tailwind CSS: 유틸리티 클래스로 스타일을 쉽게 적용할 수 있게 해줍니다 -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React: UI를 만드는 라이브러리 -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <!-- ReactDOM: React 컴포넌트를 실제 HTML에 그려주는 라이브러리 -->
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <!-- Babel: 브라우저가 JSX 문법을 이해할 수 있게 변환해줍니다 -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-100">
+  <!-- React가 화면을 그릴 위치입니다 -->
+  <div id="root"></div>
+
+  <!-- JSX를 사용하려면 type을 "text/babel"로 지정해야 합니다 -->
+  <script type="text/babel">
+    // ========================================
+    // React Hooks 가져오기
+    // useState: 컴포넌트 안에서 변하는 값(상태)을 관리하는 도구입니다
+    // ========================================
+    const { useState } = React;
+
+    // ========================================
+    // 숫자를 "1,234원" 처럼 천 단위 콤마와 함께 보여주는 함수
+    // ========================================
+    const formatWon = (num) => num.toLocaleString('ko-KR') + '원';
+
+    // ========================================
+    // 🚀 DutchPay 컴포넌트
+    // 총 금액 / 인원수 / 팁(%)을 입력하면
+    // 한 사람당 내야 할 금액을 계산해줍니다.
+    // ========================================
+    function DutchPay() {
+      // 총 금액 (입력은 문자열로 받아서 계산할 때 숫자로 변환합니다)
+      const [total, setTotal] = useState('');
+      // 인원수 (기본 2명)
+      const [people, setPeople] = useState(2);
+      // 팁 비율(%) — 기본 0%
+      const [tipPercent, setTipPercent] = useState(0);
+      // 1의 자리를 올림해서 깔끔한 금액으로 나눌지 여부
+      const [roundUp, setRoundUp] = useState(false);
+
+      // 문자열 입력을 안전하게 숫자로 변환 (빈 값이면 0)
+      const totalNum = Number(total) || 0;
+
+      // 팁을 더한 최종 금액
+      const totalWithTip = totalNum * (1 + tipPercent / 100);
+
+      // 한 사람당 금액 (인원수가 0 이하이면 0 처리)
+      let perPerson = people > 0 ? totalWithTip / people : 0;
+
+      // 올림 옵션이 켜져 있으면 100원 단위로 올림합니다
+      if (roundUp) {
+        perPerson = Math.ceil(perPerson / 100) * 100;
+      } else {
+        // 기본은 1원 단위 반올림
+        perPerson = Math.round(perPerson);
+      }
+
+      // 실제로 걷히는 총액 (1인당 금액 × 인원수)
+      const collected = perPerson * people;
+
+      // 입력값을 모두 초기화하는 함수
+      const reset = () => {
+        setTotal('');
+        setPeople(2);
+        setTipPercent(0);
+        setRoundUp(false);
+      };
+
+      return (
+        <div className="min-h-screen flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-lg p-8 w-full max-w-sm">
+            {/* 제목 영역 */}
+            <h1 className="text-2xl font-bold text-slate-800 mb-1 text-center">
+              💸 더치페이 계산기
+            </h1>
+            <p className="text-slate-500 mb-6 text-sm text-center">
+              총 금액을 인원수로 나눠 드립니다
+            </p>
+
+            {/* 총 금액 입력 */}
+            <label className="block text-sm font-semibold text-slate-700 mb-1">
+              총 금액
+            </label>
+            <div className="relative mb-5">
+              <input
+                type="number"
+                value={total}
+                onChange={(e) => setTotal(e.target.value)}
+                placeholder="예: 48000"
+                className="w-full border border-slate-300 rounded-lg px-4 py-3 pr-10 text-right text-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400">
+                원
+              </span>
+            </div>
+
+            {/* 인원수 입력: － / 숫자 / ＋ 버튼 */}
+            <label className="block text-sm font-semibold text-slate-700 mb-1">
+              인원수
+            </label>
+            <div className="flex items-center justify-between gap-3 mb-5">
+              <button
+                onClick={() => setPeople(Math.max(1, people - 1))}
+                className="w-12 h-12 rounded-lg bg-slate-200 text-slate-700 text-xl font-bold hover:bg-slate-300 active:scale-95 transition"
+              >
+                －
+              </button>
+              <div className="flex-1 text-center text-2xl font-extrabold text-slate-800">
+                {people}<span className="text-base font-normal text-slate-400">명</span>
+              </div>
+              <button
+                onClick={() => setPeople(people + 1)}
+                className="w-12 h-12 rounded-lg bg-blue-600 text-white text-xl font-bold hover:bg-blue-700 active:scale-95 transition"
+              >
+                ＋
+              </button>
+            </div>
+
+            {/* 팁 비율 선택 버튼들 */}
+            <label className="block text-sm font-semibold text-slate-700 mb-1">
+              팁 (선택)
+            </label>
+            <div className="flex gap-2 mb-5">
+              {[0, 5, 10, 15].map((tip) => (
+                <button
+                  key={tip}
+                  onClick={() => setTipPercent(tip)}
+                  className={
+                    "flex-1 py-2 rounded-lg text-sm font-semibold transition active:scale-95 " +
+                    (tipPercent === tip
+                      ? "bg-blue-600 text-white"
+                      : "bg-slate-100 text-slate-600 hover:bg-slate-200")
+                  }
+                >
+                  {tip}%
+                </button>
+              ))}
+            </div>
+
+            {/* 100원 단위 올림 옵션 */}
+            <label className="flex items-center gap-2 mb-6 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={roundUp}
+                onChange={(e) => setRoundUp(e.target.checked)}
+                className="w-4 h-4 accent-blue-600"
+              />
+              <span className="text-sm text-slate-600">100원 단위로 올림하기</span>
+            </label>
+
+            {/* 결과 표시 영역 */}
+            <div className="bg-blue-50 rounded-xl p-5 text-center mb-4">
+              <p className="text-sm text-blue-600 mb-1">1인당 내야 할 금액</p>
+              <p className="text-4xl font-extrabold text-blue-700">
+                {formatWon(perPerson)}
+              </p>
+            </div>
+
+            {/* 부가 정보: 팁 포함 총액 / 걷히는 총액 */}
+            <div className="text-sm text-slate-500 space-y-1 mb-4">
+              <div className="flex justify-between">
+                <span>팁 포함 총액</span>
+                <span className="font-semibold text-slate-700">
+                  {formatWon(Math.round(totalWithTip))}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>실제 걷히는 금액</span>
+                <span className="font-semibold text-slate-700">
+                  {formatWon(collected)}
+                </span>
+              </div>
+            </div>
+
+            {/* 초기화 버튼 */}
+            <button
+              onClick={reset}
+              className="w-full text-sm text-slate-400 hover:text-slate-600 underline"
+            >
+              초기화
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // ========================================
+    // 렌더링: DutchPay 컴포넌트를 #root 안에 그립니다
+    // ========================================
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<DutchPay />);
+  </script>
+</body>
+</html>
