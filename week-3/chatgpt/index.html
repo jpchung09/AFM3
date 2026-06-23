@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>프로필 챗봇 (OpenAI 연동)</title>
+
+  <!-- Tailwind CSS: 유틸리티 클래스로 스타일을 쉽게 적용할 수 있게 해줍니다 -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React: UI를 만드는 라이브러리 -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <!-- ReactDOM: React 컴포넌트를 실제 HTML에 그려주는 라이브러리 -->
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <!-- Babel: 브라우저가 JSX 문법을 이해할 수 있게 변환해줍니다 -->
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+</head>
+<body class="bg-slate-100">
+  <!-- React가 화면을 그릴 위치입니다 -->
+  <div id="root"></div>
+
+  <!-- JSX를 사용하려면 type을 "text/babel"로 지정해야 합니다 -->
+  <script type="text/babel">
+    // ========================================
+    // React Hooks 가져오기
+    // useState: 변하는 값(상태)을 관리, useRef: DOM 참조, useEffect: 화면 변화 후 작업
+    // ========================================
+    const { useState, useRef, useEffect } = React;
+
+    // ========================================
+    // 💰 비용(돈) 관련 안전 설정
+    // ----------------------------------------
+    // OpenAI API는 "쓴 만큼" 돈이 나가는 유료 서비스입니다.
+    // 사용자가 돈을 함부로 쓰지 않도록 아래 장치들을 넣었습니다.
+    //
+    //  1) MODEL: 가장 저렴하면서도 똑똑한 'gpt-4o-mini' 로 고정 (비싼 모델 선택 불가)
+    //  2) MAX_TOKENS: 한 번의 답변 길이를 제한해서 출력 비용을 묶어둡니다
+    //  3) HISTORY_LIMIT: 매번 보내는 과거 대화 수를 제한해서 입력 비용을 줄입니다
+    //  4) INPUT_CHAR_LIMIT: 한 번에 보낼 수 있는 메시지 글자 수 제한
+    //  5) 화면에 "이번 세션 예상 비용"을 표시해서 항상 인지하도록 합니다
+    // ========================================
+    const MODEL = 'gpt-4o-mini';      // 가장 저렴한 모델로 고정
+    const MAX_TOKENS = 300;           // 답변 최대 길이(토큰) — 비용 상한
+    const HISTORY_LIMIT = 10;         // API에 함께 보내는 최근 대화 개수
+    const INPUT_CHAR_LIMIT = 500;     // 한 메시지 최대 글자 수
+
+    // gpt-4o-mini 요금 (2024~2025 기준, 1M 토큰당 달러)
+    // 정확한 청구액이 아니라 "대략 이 정도"를 보여주기 위한 추정치입니다.
+    const PRICE_INPUT_PER_1M = 0.15;
+    const PRICE_OUTPUT_PER_1M = 0.60;
+
+    // 글자 수로 토큰 수를 아주 대략 추정 (영어/한글 평균 ~4글자당 1토큰 가정)
+    const estimateTokens = (text) => Math.ceil((text || '').length / 4);
+
+    // ========================================
+    // 프로필 프리셋 (선택지)
+    // 사용자가 고른 값으로 AI의 system 프롬프트를 만듭니다.
+    // ========================================
+    const PERSONALITIES = ['친절하고 다정한', '유머러스하고 장난스러운', '차분하고 진지한', '논리적이고 똑부러지는', '엉뚱하고 4차원인'];
+    const TONES = ['정중한 존댓말', '편한 반말', '귀여운 말투(이모지 사용)', '사극풍 말투', '간결하고 핵심만'];
+
+    // ========================================
+    // 🤖 프로필로 system 프롬프트(= AI의 정체성 지시문) 만들기
+    // ========================================
+    const buildSystemPrompt = (p) => {
+      return [
+        `너는 "${p.name}"라는 이름의 AI 어시스턴트야.`,
+        `성격: ${p.personality}.`,
+        `말투: 모든 답변을 "${p.tone}" 스타일로 일관되게 해.`,
+        `전문분야: ${p.expertise}. 이 분야에 대해 특히 잘 알고 자신있게 답변해.`,
+        `규칙: 항상 이 프로필을 유지하고, 답변은 너무 길지 않게 핵심 위주로 간결하게 해줘.`,
+      ].join(' ');
+    };
+
+    // ========================================
+    // 🟢 메인 컴포넌트
+    // ========================================
+    function ChatApp() {
+      // --- API 키: 코드에 넣지 않고, 화면에서 입력받아 브라우저(localStorage)에만 저장 ---
+      const [apiKey, setApiKey] = useState(() => localStorage.getItem('openai_api_key') || '');
+      const [showKey, setShowKey] = useState(false);
+
+      // --- AI 프로필 ---
+      const [profile, setProfile] = useState(() => {
+        const saved = localStorage.getItem('chat_profile');
+        return saved ? JSON.parse(saved) : {
+          name: '모리',
+          personality: PERSONALITIES[0],
+          tone: TONES[0],
+          expertise: '일상 대화와 공부 도우미',
+        };
+      });
+      const [showSettings, setShowSettings] = useState(true);
+
+      // --- 대화 기록 ---
+      const [messages, setMessages] = useState([]);   // { role: 'user'|'assistant', content }
+      const [input, setInput] = useState('');
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState('');
+
+      // --- 세션 누적 토큰/비용 (돈을 인지시키기 위함) ---
+      const [usage, setUsage] = useState({ inTok: 0, outTok: 0 });
+
+      const scrollRef = useRef(null);
+
+      // 새 메시지가 생기면 맨 아래로 스크롤
+      useEffect(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }, [messages, loading]);
+
+      // 프로필이 바뀌면 저장
+      useEffect(() => {
+        localStorage.setItem('chat_profile', JSON.stringify(profile));
+      }, [profile]);
+
+      // 예상 누적 비용(달러)
+      const estCost = (usage.inTok / 1e6) * PRICE_INPUT_PER_1M + (usage.outTok / 1e6) * PRICE_OUTPUT_PER_1M;
+
+      // API 키 저장
+      const saveKey = (val) => {
+        setApiKey(val);
+        localStorage.setItem('openai_api_key', val);
+      };
+
+      // 프로필 항목 변경 헬퍼
+      const updateProfile = (key, val) => setProfile((prev) => ({ ...prev, [key]: val }));
+
+      // ========================================
+      // 📨 메시지 전송 → OpenAI API 호출
+      // ========================================
+      const sendMessage = async () => {
+        const text = input.trim();
+        if (!text || loading) return;
+
+        // 키 확인 — 키가 없으면 절대 호출하지 않음(=돈 안 나감)
+        if (!apiKey) {
+          setError('먼저 OpenAI API 키를 입력해주세요. (키가 없으면 API 호출 자체를 하지 않아 돈이 들지 않습니다)');
+          setShowSettings(true);
+          return;
+        }
+
+        setError('');
+        const newMessages = [...messages, { role: 'user', content: text }];
+        setMessages(newMessages);
+        setInput('');
+        setLoading(true);
+
+        // 💰 비용 절약: 최근 HISTORY_LIMIT개 대화만 보냅니다.
+        const trimmed = newMessages.slice(-HISTORY_LIMIT);
+        const payloadMessages = [
+          { role: 'system', content: buildSystemPrompt(profile) },
+          ...trimmed,
+        ];
+
+        try {
+          const res = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              model: MODEL,           // 저렴한 모델 고정
+              messages: payloadMessages,
+              max_tokens: MAX_TOKENS, // 출력 비용 상한
+              temperature: 0.8,
+            }),
+          });
+
+          const data = await res.json();
+
+          if (!res.ok) {
+            // OpenAI가 돌려준 에러를 사람이 이해하기 쉽게 안내
+            const code = data?.error?.code || data?.error?.type || res.status;
+            let msg = data?.error?.message || '알 수 없는 오류가 발생했습니다.';
+            if (code === 'insufficient_quota' || res.status === 429) {
+              msg = '계정에 사용 가능한 크레딧/한도가 없습니다. 이 경우 호출이 실패하므로 비용은 청구되지 않습니다. (결제 정보가 없거나 무료 크레딧이 소진된 상태일 수 있어요.)';
+            } else if (res.status === 401) {
+              msg = 'API 키가 올바르지 않습니다. 키를 다시 확인해주세요.';
+            }
+            setError(msg);
+            setLoading(false);
+            return;
+          }
+
+          const reply = data.choices?.[0]?.message?.content?.trim() || '(빈 응답)';
+          setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+
+          // 실제 사용 토큰을 누적 (API가 정확한 사용량을 알려줍니다)
+          const u = data.usage || {};
+          setUsage((prev) => ({
+            inTok: prev.inTok + (u.prompt_tokens || estimateTokens(JSON.stringify(payloadMessages))),
+            outTok: prev.outTok + (u.completion_tokens || estimateTokens(reply)),
+          }));
+        } catch (e) {
+          setError('네트워크 오류: ' + e.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      // 엔터로 전송 (Shift+Enter는 줄바꿈)
+      const onKeyDown = (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          sendMessage();
+        }
+      };
+
+      const clearChat = () => {
+        setMessages([]);
+        setError('');
+      };
+
+      return (
+        <div className="max-w-2xl mx-auto p-4 min-h-screen flex flex-col">
+          {/* 헤더 */}
+          <header className="mb-3">
+            <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
+              🤖 {profile.name}
+              <span className="text-xs font-normal bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">
+                {MODEL}
+              </span>
+            </h1>
+            <p className="text-sm text-slate-500">{profile.personality} · {profile.tone} · {profile.expertise}</p>
+          </header>
+
+          {/* 💰 비용 안전 안내 배너 */}
+          <div className="mb-3 text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded-lg px-3 py-2">
+            💡 비용 절약 모드: 가장 저렴한 <b>{MODEL}</b> 모델 · 답변 최대 {MAX_TOKENS}토큰 · 최근 {HISTORY_LIMIT}개 대화만 전송.
+            <span className="block mt-0.5">
+              이번 세션 예상 비용: <b>${estCost.toFixed(5)}</b>
+              <span className="text-amber-600"> (입력 {usage.inTok} · 출력 {usage.outTok} 토큰)</span>
+            </span>
+          </div>
+
+          {/* ⚙️ 설정 패널 (API 키 + 프로필) */}
+          <div className="mb-3 bg-white rounded-xl shadow-sm border border-slate-200">
+            <button
+              onClick={() => setShowSettings((s) => !s)}
+              className="w-full flex justify-between items-center px-4 py-2.5 text-sm font-semibold text-slate-700"
+            >
+              ⚙️ AI 프로필 & API 키 설정
+              <span className="text-slate-400">{showSettings ? '▲' : '▼'}</span>
+            </button>
+
+            {showSettings && (
+              <div className="px-4 pb-4 space-y-3 border-t border-slate-100 pt-3">
+                {/* API 키 */}
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    OpenAI API 키 <span className="text-slate-400">(브라우저에만 저장됩니다)</span>
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type={showKey ? 'text' : 'password'}
+                      value={apiKey}
+                      onChange={(e) => saveKey(e.target.value)}
+                      placeholder="sk-... 키를 붙여넣으세요"
+                      className="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                    />
+                    <button
+                      onClick={() => setShowKey((s) => !s)}
+                      className="px-3 text-sm border border-slate-300 rounded-lg text-slate-600 hover:bg-slate-50"
+                    >
+                      {showKey ? '숨기기' : '보기'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* 이름 */}
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">AI 이름</label>
+                  <input
+                    value={profile.name}
+                    onChange={(e) => updateProfile('name', e.target.value)}
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                  />
+                </div>
+
+                {/* 성격 */}
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">성격</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {PERSONALITIES.map((p) => (
+                      <button
+                        key={p}
+                        onClick={() => updateProfile('personality', p)}
+                        className={`text-xs px-2.5 py-1 rounded-full border ${
+                          profile.personality === p
+                            ? 'bg-emerald-500 text-white border-emerald-500'
+                            : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'
+                        }`}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 말투 */}
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">말투</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {TONES.map((t) => (
+                      <button
+                        key={t}
+                        onClick={() => updateProfile('tone', t)}
+                        className={`text-xs px-2.5 py-1 rounded-full border ${
+                          profile.tone === t
+                            ? 'bg-emerald-500 text-white border-emerald-500'
+                            : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'
+                        }`}
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 전문분야 */}
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">전문분야</label>
+                  <input
+                    value={profile.expertise}
+                    onChange={(e) => updateProfile('expertise', e.target.value)}
+                    placeholder="예: 파이썬 프로그래밍, 한국사, 요리..."
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 💬 대화 영역 */}
+          <div
+            ref={scrollRef}
+            className="flex-1 bg-white rounded-xl shadow-sm border border-slate-200 p-4 overflow-y-auto space-y-3 min-h-[280px]"
+          >
+            {messages.length === 0 && !loading && (
+              <div className="h-full flex flex-col items-center justify-center text-slate-400 text-sm text-center">
+                <div className="text-4xl mb-2">💬</div>
+                <p>{profile.name}에게 말을 걸어보세요!</p>
+                <p className="text-xs mt-1">설정한 프로필대로 대답합니다.</p>
+              </div>
+            )}
+
+            {messages.map((m, i) => (
+              <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div
+                  className={`max-w-[80%] px-3.5 py-2.5 rounded-2xl text-sm whitespace-pre-wrap leading-relaxed ${
+                    m.role === 'user'
+                      ? 'bg-emerald-500 text-white rounded-br-sm'
+                      : 'bg-slate-100 text-slate-800 rounded-bl-sm'
+                  }`}
+                >
+                  {m.content}
+                </div>
+              </div>
+            ))}
+
+            {loading && (
+              <div className="flex justify-start">
+                <div className="bg-slate-100 text-slate-500 px-3.5 py-2.5 rounded-2xl rounded-bl-sm text-sm">
+                  <span className="animate-pulse">{profile.name}가 입력 중...</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 에러 메시지 */}
+          {error && (
+            <div className="mt-2 text-xs bg-red-50 border border-red-200 text-red-700 rounded-lg px-3 py-2">
+              ⚠️ {error}
+            </div>
+          )}
+
+          {/* ✍️ 입력 영역 */}
+          <div className="mt-3 flex gap-2 items-end">
+            <div className="flex-1">
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value.slice(0, INPUT_CHAR_LIMIT))}
+                onKeyDown={onKeyDown}
+                rows={1}
+                placeholder="메시지를 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)"
+                className="w-full border border-slate-300 rounded-xl px-3 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-emerald-400"
+              />
+              <div className="text-[10px] text-slate-400 text-right pr-1 mt-0.5">
+                {input.length}/{INPUT_CHAR_LIMIT}
+              </div>
+            </div>
+            <button
+              onClick={sendMessage}
+              disabled={loading || !input.trim()}
+              className="bg-emerald-500 text-white px-5 py-2.5 rounded-xl text-sm font-semibold disabled:opacity-40 hover:bg-emerald-600 transition"
+            >
+              전송
+            </button>
+            <button
+              onClick={clearChat}
+              className="border border-slate-300 text-slate-500 px-3 py-2.5 rounded-xl text-sm hover:bg-slate-50"
+              title="대화 비우기"
+            >
+              🗑️
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // 화면에 그리기
+    ReactDOM.createRoot(document.getElementById('root')).render(<ChatApp />);
+  </script>
+</body>
+</html>

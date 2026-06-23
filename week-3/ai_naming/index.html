@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI 별명 생성기</title>
+
+  <!-- Tailwind CSS: 유틸리티 클래스로 스타일을 쉽게 적용 -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+
+  <!-- React: UI 라이브러리 -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <!-- ReactDOM: React 컴포넌트를 실제 HTML에 그려줌 -->
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <!-- Babel: 브라우저가 JSX 문법을 이해할 수 있게 변환 (7.x 고정) -->
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+</head>
+<body class="bg-slate-100">
+  <!-- React가 화면을 그릴 위치 -->
+  <div id="root"></div>
+
+  <!-- JSX를 쓰려면 type을 "text/babel"로 지정 -->
+  <script type="text/babel">
+    // ========================================
+    // React Hooks 가져오기
+    // useState: 변하는 값(상태) 관리, useEffect: 화면 변화 후 작업
+    // ========================================
+    const { useState, useEffect } = React;
+
+    // ========================================
+    // 💰 비용(돈) 관련 안전 설정
+    // ----------------------------------------
+    // OpenAI API는 "쓴 만큼" 돈이 나가는 유료 서비스입니다.
+    // 사용자가 돈을 함부로 쓰지 않도록 아래 장치들을 넣었습니다.
+    //
+    //  1) MODEL: 가장 저렴하고 똑똑한 'gpt-4o-mini' 로 고정 (변경 불가)
+    //  2) MAX_TOKENS: 한 번의 응답 길이를 제한해서 출력 비용을 묶어둠
+    //  3) 키가 없으면 API 호출 자체를 하지 않음 → 돈이 들지 않음
+    // ========================================
+    const MODEL = 'gpt-4o-mini';   // 가장 저렴한 모델로 고정 (변경 불가)
+    const MAX_TOKENS = 200;        // 응답 최대 길이(토큰) — 비용 상한
+    const NICKNAME_COUNT = 5;      // 한 번에 만들 별명 개수
+
+    // ========================================
+    // 🎭 성격 칩 프리셋 (선택지)
+    // 사용자가 직접 입력할 수도 있고, 칩을 눌러 빠르게 채울 수도 있습니다.
+    // ========================================
+    const PERSONALITY_CHIPS = ['활발한', '차분한', '엉뚱한', '다정한', '도도한', '열정적인', '느긋한', '꼼꼼한'];
+
+    // ========================================
+    // 🤖 사용자 정보로 프롬프트(= AI에게 보낼 요청문) 만들기
+    // ========================================
+    const buildUserPrompt = (name, personality, hobby) => {
+      return [
+        `다음 사람에게 어울리는 재미있고 센스있는 별명 ${NICKNAME_COUNT}개를 지어줘.`,
+        `이름: ${name}`,
+        `성격: ${personality}`,
+        `취미: ${hobby}`,
+        `각 별명은 한국어로, 부르기 좋게 짧게(보통 2~6글자) 만들어줘.`,
+        `각 별명마다 왜 그렇게 지었는지 짧은 한 줄 설명(reason)을 붙여줘.`,
+      ].join('\n');
+    };
+
+    // AI가 JSON 배열만 출력하도록 강제하는 system 프롬프트
+    const SYSTEM_PROMPT =
+      `너는 사람들에게 재치있는 별명을 지어주는 작명 전문가야. ` +
+      `반드시 아래 형식의 JSON 객체 하나만 출력해. 다른 말, 인사, 코드블록(\`\`\`)은 절대 붙이지 마. ` +
+      `형식: {"nicknames":[{"nickname":"별명","reason":"짧은 설명"}, ...]} . ` +
+      `nicknames 배열에는 정확히 ${NICKNAME_COUNT}개의 항목을 넣어.`;
+
+    // ========================================
+    // 🧹 AI 응답에서 별명 목록을 안전하게 뽑아내기
+    // 1순위: JSON 파싱 (정상 케이스)
+    // 2순위(fallback): 줄바꿈으로 분리해서 대충이라도 별명을 건짐
+    // ========================================
+    const parseNicknames = (raw) => {
+      if (!raw) return [];
+
+      // 1) 코드블록 표시(```)가 섞여 있으면 제거
+      let text = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+
+      // 2) JSON 파싱 시도 (객체 또는 배열 형태 모두 대응)
+      try {
+        // 본문에서 가장 바깥쪽 { } 또는 [ ] 부분만 추출
+        const objMatch = text.match(/\{[\s\S]*\}/);
+        const arrMatch = text.match(/\[[\s\S]*\]/);
+        let parsed = null;
+
+        if (objMatch) {
+          parsed = JSON.parse(objMatch[0]);
+        } else if (arrMatch) {
+          parsed = JSON.parse(arrMatch[0]);
+        }
+
+        if (parsed) {
+          // {nicknames:[...]} 형태 또는 [...] 형태 둘 다 받기
+          const list = Array.isArray(parsed) ? parsed : parsed.nicknames;
+          if (Array.isArray(list)) {
+            return list
+              .map((item) => {
+                if (typeof item === 'string') return { nickname: item, reason: '' };
+                return {
+                  nickname: (item.nickname || item.name || '').toString().trim(),
+                  reason: (item.reason || item.meaning || '').toString().trim(),
+                };
+              })
+              .filter((x) => x.nickname);
+          }
+        }
+      } catch (e) {
+        // JSON 파싱 실패 → 아래 fallback으로 넘어감
+      }
+
+      // 3) Fallback: 줄 단위로 나눠서 번호/기호를 떼고 별명만 추출
+      return text
+        .split('\n')
+        .map((line) => line.replace(/^[\s\-*0-9.)"]+/, '').trim())
+        .filter(Boolean)
+        .slice(0, NICKNAME_COUNT)
+        .map((line) => ({ nickname: line, reason: '' }));
+    };
+
+    // ========================================
+    // 📋 별명 카드 — 별명 + 설명 + 복사 버튼
+    // 클릭하면 클립보드에 복사하고 "복사됨!" 피드백을 잠깐 보여줍니다.
+    // ========================================
+    function NicknameCard({ item, index }) {
+      const [copied, setCopied] = useState(false);
+
+      const handleCopy = async () => {
+        try {
+          await navigator.clipboard.writeText(item.nickname);
+        } catch (e) {
+          // clipboard API가 막힌 환경을 위한 예비 복사 방법
+          const ta = document.createElement('textarea');
+          ta.value = item.nickname;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+        }
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      };
+
+      return (
+        <div className="flex items-center justify-between gap-3 bg-white border border-slate-200 rounded-xl px-4 py-3 shadow-sm hover:border-emerald-300 transition">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-emerald-500 bg-emerald-50 rounded-full w-5 h-5 flex items-center justify-center shrink-0">
+                {index + 1}
+              </span>
+              <span className="text-base font-semibold text-slate-800 truncate">{item.nickname}</span>
+            </div>
+            {item.reason && (
+              <p className="text-xs text-slate-500 mt-1 ml-7 leading-relaxed">{item.reason}</p>
+            )}
+          </div>
+          <button
+            onClick={handleCopy}
+            className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+              copied
+                ? 'bg-emerald-500 text-white border-emerald-500'
+                : 'bg-white text-emerald-600 border-emerald-300 hover:bg-emerald-50'
+            }`}
+          >
+            {copied ? '복사됨!' : '복사'}
+          </button>
+        </div>
+      );
+    }
+
+    // ========================================
+    // 🟢 메인 컴포넌트
+    // ========================================
+    function NicknameApp() {
+      // --- API 키: 코드에 넣지 않고, 화면에서 입력받아 브라우저(localStorage)에만 저장 ---
+      const [apiKey, setApiKey] = useState(() => localStorage.getItem('openai_api_key') || '');
+      const [showKey, setShowKey] = useState(false);
+      const [showKeyPanel, setShowKeyPanel] = useState(() => !localStorage.getItem('openai_api_key'));
+
+      // --- 입력 값 ---
+      const [name, setName] = useState('');
+      const [personality, setPersonality] = useState('');
+      const [hobby, setHobby] = useState('');
+
+      // --- 결과/상태 ---
+      const [nicknames, setNicknames] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState('');
+
+      // API 키 저장 (localStorage에 'openai_api_key' 키로 재사용)
+      const saveKey = (val) => {
+        setApiKey(val);
+        localStorage.setItem('openai_api_key', val);
+      };
+
+      // 입력이 하나라도 비어 있으면 생성 버튼 비활성화
+      const canGenerate = name.trim() && personality.trim() && hobby.trim() && !loading;
+
+      // ========================================
+      // ✨ 별명 생성 → OpenAI API 호출
+      // ========================================
+      const generate = async () => {
+        // 키 확인 — 키가 없으면 절대 호출하지 않음 (= 돈이 들지 않음)
+        if (!apiKey) {
+          setError('먼저 OpenAI API 키를 입력해주세요. (키가 없으면 API 호출 자체를 하지 않아 돈이 들지 않습니다.)');
+          setShowKeyPanel(true);
+          return;
+        }
+        if (!canGenerate) {
+          setError('이름, 성격, 취미를 모두 입력해주세요.');
+          return;
+        }
+
+        setError('');
+        setLoading(true);
+        setNicknames([]);
+
+        try {
+          const res = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              model: MODEL,                              // 저렴한 모델 고정
+              max_tokens: MAX_TOKENS,                    // 출력 비용 상한
+              temperature: 0.9,                          // 약간 창의적으로
+              response_format: { type: 'json_object' },  // JSON만 받도록 요청 (안정적 파싱)
+              messages: [
+                { role: 'system', content: SYSTEM_PROMPT },
+                { role: 'user', content: buildUserPrompt(name.trim(), personality.trim(), hobby.trim()) },
+              ],
+            }),
+          });
+
+          const data = await res.json();
+
+          if (!res.ok) {
+            // OpenAI가 돌려준 에러를 사람이 이해하기 쉽게 안내
+            const code = data?.error?.code || data?.error?.type || res.status;
+            let msg = data?.error?.message || '알 수 없는 오류가 발생했습니다.';
+            if (code === 'insufficient_quota' || res.status === 429) {
+              msg = '계정에 사용 가능한 크레딧/한도가 없습니다. 이 경우 호출이 실패하므로 비용은 청구되지 않습니다. (결제 정보가 없거나 무료 크레딧이 소진된 상태일 수 있어요.)';
+            } else if (res.status === 401) {
+              msg = 'API 키가 올바르지 않습니다. 키를 다시 확인해주세요.';
+            }
+            setError(msg);
+            return;
+          }
+
+          const reply = data.choices?.[0]?.message?.content || '';
+          const list = parseNicknames(reply);
+
+          if (list.length === 0) {
+            setError('별명을 만들지 못했어요. 잠시 후 다시 시도해주세요.');
+            return;
+          }
+          setNicknames(list);
+        } catch (e) {
+          setError('네트워크 오류: ' + e.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      return (
+        <div className="max-w-xl mx-auto p-4 min-h-screen">
+          {/* 헤더 */}
+          <header className="mb-3 text-center pt-2">
+            <h1 className="text-2xl font-bold text-slate-800 flex items-center justify-center gap-2">
+              ✨ AI 별명 생성기
+            </h1>
+            <p className="text-sm text-slate-500 mt-1">
+              이름 · 성격 · 취미를 알려주면 어울리는 별명을 지어드려요
+            </p>
+          </header>
+
+          {/* 💰 비용 안전 안내 배너 */}
+          <div className="mb-3 text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded-lg px-3 py-2">
+            💡 비용 절약 모드: 가장 저렴한 <b>{MODEL}</b> 모델 · 응답 최대 {MAX_TOKENS}토큰으로 제한.
+            <span className="block mt-0.5">키가 없으면 호출 자체를 하지 않아 돈이 들지 않아요.</span>
+          </div>
+
+          {/* 🔑 API 키 패널 */}
+          <div className="mb-3 bg-white rounded-xl shadow-sm border border-slate-200">
+            <button
+              onClick={() => setShowKeyPanel((s) => !s)}
+              className="w-full flex justify-between items-center px-4 py-2.5 text-sm font-semibold text-slate-700"
+            >
+              <span>🔑 OpenAI API 키 {apiKey ? '✅' : '(필요)'}</span>
+              <span className="text-slate-400">{showKeyPanel ? '▲' : '▼'}</span>
+            </button>
+
+            {showKeyPanel && (
+              <div className="px-4 pb-4 border-t border-slate-100 pt-3">
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  OpenAI API 키 <span className="text-slate-400">(브라우저에만 저장됩니다)</span>
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type={showKey ? 'text' : 'password'}
+                    value={apiKey}
+                    onChange={(e) => saveKey(e.target.value)}
+                    placeholder="sk-... 키를 붙여넣으세요"
+                    className="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                  />
+                  <button
+                    onClick={() => setShowKey((s) => !s)}
+                    className="px-3 text-sm border border-slate-300 rounded-lg text-slate-600 hover:bg-slate-50"
+                  >
+                    {showKey ? '숨기기' : '보기'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* ✍️ 입력 폼 */}
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 space-y-4">
+            {/* 이름 */}
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">이름</label>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="예: 김하늘"
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+              />
+            </div>
+
+            {/* 성격 (직접 입력 + 칩 선택) */}
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">성격</label>
+              <input
+                value={personality}
+                onChange={(e) => setPersonality(e.target.value)}
+                placeholder="예: 활발하고 장난기 많은"
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+              />
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {PERSONALITY_CHIPS.map((chip) => (
+                  <button
+                    key={chip}
+                    type="button"
+                    onClick={() => setPersonality(chip)}
+                    className="text-xs px-2.5 py-1 rounded-full border bg-white text-slate-600 border-slate-300 hover:bg-emerald-50 hover:border-emerald-300 transition"
+                  >
+                    {chip}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 취미 */}
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">취미</label>
+              <input
+                value={hobby}
+                onChange={(e) => setHobby(e.target.value)}
+                placeholder="예: 등산, 게임, 베이킹"
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+              />
+            </div>
+
+            {/* 생성 버튼 */}
+            <button
+              onClick={generate}
+              disabled={!canGenerate}
+              className="w-full bg-emerald-500 text-white px-5 py-2.5 rounded-xl text-sm font-semibold disabled:opacity-40 hover:bg-emerald-600 transition flex items-center justify-center gap-2"
+            >
+              {loading ? (
+                <span className="animate-pulse">별명 짓는 중...</span>
+              ) : (
+                <>✨ 별명 생성</>
+              )}
+            </button>
+          </div>
+
+          {/* 에러 메시지 */}
+          {error && (
+            <div className="mt-3 text-xs bg-red-50 border border-red-200 text-red-700 rounded-lg px-3 py-2">
+              ⚠️ {error}
+            </div>
+          )}
+
+          {/* 🎉 결과 목록 */}
+          {nicknames.length > 0 && (
+            <div className="mt-4">
+              <h2 className="text-sm font-semibold text-slate-600 mb-2 px-1">
+                마음에 드는 별명을 복사하세요 👇
+              </h2>
+              <div className="space-y-2">
+                {nicknames.map((item, i) => (
+                  <NicknameCard key={i} item={item} index={i} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* 빈 상태 (아직 결과 없음 & 로딩 아님) */}
+          {nicknames.length === 0 && !loading && !error && (
+            <div className="mt-6 text-center text-slate-400 text-sm">
+              <div className="text-4xl mb-2">🏷️</div>
+              <p>정보를 입력하고 별명을 만들어보세요!</p>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // 화면에 그리기
+    ReactDOM.createRoot(document.getElementById('root')).render(<NicknameApp />);
+  </script>
+</body>
+</html>
