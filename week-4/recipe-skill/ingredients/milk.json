@@ -1,0 +1,9 @@
+{
+  "name": "우유",
+  "name_en": "milk",
+  "quantity": "1L",
+  "unit": "ml",
+  "category": "냉장",
+  "calories_per_unit": 0.6,
+  "expiry": "2026-07-03"
+}

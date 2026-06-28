@@ -1,0 +1,13 @@
+{
+  "name": "anon-board",
+  "version": "1.0.0",
+  "description": "익명 공감 게시판 — 카테고리 글 작성 + 공감(좋아요) UPDATE + 최신순/공감순 정렬 (Express + PostgreSQL/Supabase + CDN React)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.22.0"
+  }
+}

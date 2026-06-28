@@ -1,0 +1,13 @@
+{
+  "name": "recipe-ai-app",
+  "version": "1.0.0",
+  "description": "냉장고 재료(DB) → AI 레시피 생성 → DB 저장 → 목록 조회 (Express + PostgreSQL/Supabase + CDN React + Claude API)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.22.0"
+  }
+}

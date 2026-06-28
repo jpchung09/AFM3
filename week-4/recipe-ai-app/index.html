@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🧊 냉장고 → AI 레시피</title>
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <!-- ⚠️ 모든 CDN은 버전을 명시적으로 고정한다. Babel 은 반드시 7.x 로 고정. -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+  <style>
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    .animate-fade-in { animation: fadeIn 0.18s ease-out; }
+  </style>
+</head>
+<body class="bg-slate-100">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useMemo } = React;
+    const API_BASE_URL = '/api';
+
+    async function apiRequest(path, options = {}) {
+      const res = await fetch(`${API_BASE_URL}${path}`, {
+        headers: { 'Content-Type': 'application/json' },
+        ...options,
+      });
+      let body = null;
+      try { body = await res.json(); } catch (e) { /* no body */ }
+      if (!res.ok || !body || body.success === false) {
+        const msg = (body && (body.message || body.error)) || `요청 실패 (HTTP ${res.status})`;
+        throw new Error(msg);
+      }
+      return body;
+    }
+
+    // ============ Design System ============
+    function Button({ variant = 'primary', size = 'md', disabled, onClick, type = 'button', className = '', children, ...rest }) {
+      const base = 'inline-flex items-center justify-center font-medium rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-offset-1 disabled:opacity-50 disabled:cursor-not-allowed';
+      const variants = {
+        primary: 'bg-emerald-600 text-white hover:bg-emerald-700 focus:ring-emerald-400',
+        secondary: 'bg-slate-200 text-slate-700 hover:bg-slate-300 focus:ring-slate-400',
+        danger: 'bg-red-100 text-red-600 hover:bg-red-200 focus:ring-red-300',
+        ghost: 'bg-transparent text-slate-500 hover:bg-slate-100 focus:ring-slate-300',
+      };
+      const sizes = { sm: 'text-xs px-2.5 py-1.5', md: 'text-sm px-4 py-2', lg: 'text-base px-5 py-2.5' };
+      return (
+        <button type={type} disabled={disabled} onClick={onClick}
+          className={`${base} ${variants[variant]} ${sizes[size]} ${className}`} {...rest}>
+          {children}
+        </button>
+      );
+    }
+
+    function Input({ value, onChange, placeholder, disabled, onKeyDown, className = '' }) {
+      return (
+        <input
+          value={value} onChange={onChange} placeholder={placeholder} disabled={disabled} onKeyDown={onKeyDown}
+          className={`w-full px-3 py-2 text-sm rounded-lg border border-slate-300 bg-white placeholder-slate-400
+            focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent disabled:bg-slate-100 ${className}`}
+        />
+      );
+    }
+
+    function Card({ className = '', children }) {
+      return <div className={`bg-white rounded-2xl shadow-sm ${className}`}>{children}</div>;
+    }
+
+    function Spinner({ className = '' }) {
+      return (
+        <svg className={`animate-spin h-5 w-5 ${className}`} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+        </svg>
+      );
+    }
+
+    function Alert({ message, tone = 'error', onClose }) {
+      if (!message) return null;
+      const tones = {
+        error: 'bg-red-50 border-red-200 text-red-700',
+        info: 'bg-sky-50 border-sky-200 text-sky-700',
+      };
+      return (
+        <div role="alert" className={`flex items-start gap-3 border text-sm rounded-lg px-4 py-3 animate-fade-in ${tones[tone]}`}>
+          <span className="mt-0.5">{tone === 'error' ? '⚠️' : 'ℹ️'}</span>
+          <p className="flex-1">{message}</p>
+          {onClose && <button onClick={onClose} aria-label="닫기" className="opacity-60 hover:opacity-100">✕</button>}
+        </div>
+      );
+    }
+
+    const DIFF_BADGE = {
+      '쉬움': 'bg-green-100 text-green-700',
+      '보통': 'bg-amber-100 text-amber-700',
+      '어려움': 'bg-red-100 text-red-700',
+    };
+    function Badge({ children, className = '' }) {
+      return <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${className}`}>{children}</span>;
+    }
+
+    const CATEGORIES = ['냉장', '냉동', '실온'];
+    const OPTIONS = [
+      { key: '기본', emoji: '🍽️' },
+      { key: '간단요리', emoji: '⏱️' },
+      { key: '다이어트', emoji: '🥗' },
+      { key: '야식', emoji: '🌙' },
+    ];
+
+    // ============ 재료 패널 ============
+    function IngredientPanel({ ingredients, onAdd, onDelete, adding, busyIds }) {
+      const [name, setName] = useState('');
+      const [quantity, setQuantity] = useState('');
+      const [category, setCategory] = useState('냉장');
+
+      const submit = () => {
+        if (!name.trim() || adding) return;
+        onAdd({ name: name.trim(), quantity: quantity.trim(), category });
+        setName(''); setQuantity('');
+      };
+
+      return (
+        <Card className="p-5 space-y-4">
+          <h2 className="text-lg font-bold text-slate-800">🧊 냉장고 재료</h2>
+          <div className="space-y-2">
+            <div className="flex gap-2">
+              <Input value={name} onChange={e => setName(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') submit(); }} placeholder="재료명 (예: 계란)" disabled={adding} />
+              <Input value={quantity} onChange={e => setQuantity(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') submit(); }} placeholder="수량 (예: 3개)" disabled={adding} className="max-w-[120px]" />
+            </div>
+            <div className="flex gap-2">
+              <select value={category} onChange={e => setCategory(e.target.value)} disabled={adding}
+                className="px-3 py-2 text-sm rounded-lg border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <Button onClick={submit} disabled={adding || !name.trim()} className="flex-1">
+                {adding ? <Spinner /> : '재료 추가'}
+              </Button>
+            </div>
+          </div>
+
+          <div className="border border-slate-200 rounded-xl overflow-hidden">
+            {ingredients.length === 0 ? (
+              <div className="py-8 text-center text-slate-400 text-sm">아직 재료가 없어요. 냉장고를 채워주세요!</div>
+            ) : (
+              <ul className="divide-y divide-slate-100">
+                {ingredients.map(ing => (
+                  <li key={ing.id} className="flex items-center gap-2 px-3 py-2.5 group animate-fade-in">
+                    <Badge className="bg-slate-100 text-slate-500">{ing.category}</Badge>
+                    <span className="flex-1 text-sm text-slate-700">{ing.name}</span>
+                    {ing.quantity && <span className="text-xs text-slate-400">{ing.quantity}</span>}
+                    <Button size="sm" variant="danger" disabled={busyIds.has(ing.id)} onClick={() => onDelete(ing)}>삭제</Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <p className="text-xs text-slate-400 text-center">총 {ingredients.length}개 재료 · DB에 저장됨</p>
+        </Card>
+      );
+    }
+
+    // ============ 생성 + 미리보기 패널 ============
+    function GeneratePanel({ ingredients, onSaved }) {
+      const [option, setOption] = useState('기본');
+      const [generating, setGenerating] = useState(false);
+      const [preview, setPreview] = useState(null);
+      const [meta, setMeta] = useState(null);
+      const [saving, setSaving] = useState(false);
+      const [error, setError] = useState('');
+
+      const generate = useCallback(async () => {
+        if (ingredients.length === 0) { setError('먼저 냉장고에 재료를 추가해주세요.'); return; }
+        setGenerating(true); setError(''); setPreview(null);
+        try {
+          const { data, meta } = await apiRequest('/recipes/generate', {
+            method: 'POST', body: JSON.stringify({ option }),
+          });
+          setPreview(data); setMeta(meta);
+        } catch (e) {
+          setError(`레시피 생성 실패: ${e.message}`);
+        } finally {
+          setGenerating(false);
+        }
+      }, [option, ingredients.length]);
+
+      const save = useCallback(async () => {
+        if (!preview) return;
+        setSaving(true); setError('');
+        try {
+          await apiRequest('/recipes', { method: 'POST', body: JSON.stringify(preview) });
+          setPreview(null); setMeta(null);
+          onSaved();
+        } catch (e) {
+          setError(`저장 실패: ${e.message}`);
+        } finally {
+          setSaving(false);
+        }
+      }, [preview, onSaved]);
+
+      return (
+        <Card className="p-5 space-y-4">
+          <h2 className="text-lg font-bold text-slate-800">🤖 AI 레시피 생성</h2>
+
+          <div>
+            <p className="text-xs text-slate-500 mb-2">옵션 선택</p>
+            <div className="grid grid-cols-4 gap-1.5">
+              {OPTIONS.map(o => (
+                <button key={o.key} onClick={() => setOption(o.key)}
+                  className={`text-sm py-2 rounded-lg border transition-colors
+                    ${option === o.key ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-600 border-slate-200 hover:border-emerald-300'}`}>
+                  <div>{o.emoji}</div>{o.key}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <Button onClick={generate} disabled={generating} size="lg" className="w-full">
+            {generating ? <><Spinner className="mr-2" /> 생성 중...</> : '✨ 재료로 레시피 만들기'}
+          </Button>
+
+          <Alert message={error} onClose={() => setError('')} />
+
+          {preview && (
+            <div className="border-2 border-emerald-200 rounded-xl p-4 space-y-3 animate-fade-in bg-emerald-50/40">
+              <div className="flex items-start justify-between gap-2">
+                <h3 className="text-base font-bold text-slate-800">{preview.title}</h3>
+                <Badge className={meta && meta.aiUsed ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-500'}>
+                  {meta && meta.aiUsed ? 'AI 생성' : '기본 생성'}
+                </Badge>
+              </div>
+              <p className="text-sm text-slate-600">{preview.description}</p>
+              <div className="flex flex-wrap gap-2">
+                <Badge className="bg-slate-100 text-slate-600">⏱️ {preview.cookTime}분</Badge>
+                <Badge className={DIFF_BADGE[preview.difficulty] || 'bg-slate-100 text-slate-600'}>난이도 {preview.difficulty}</Badge>
+                <Badge className="bg-orange-100 text-orange-700">🔥 {preview.calories} kcal</Badge>
+                <Badge className="bg-emerald-100 text-emerald-700">{preview.option}</Badge>
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-slate-500 mb-1">재료</p>
+                <div className="flex flex-wrap gap-1">
+                  {preview.ingredientsUsed.map((x, i) => <Badge key={i} className="bg-white border border-slate-200 text-slate-600">{x}</Badge>)}
+                </div>
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-slate-500 mb-1">만드는 법</p>
+                <ol className="list-decimal list-inside text-sm text-slate-700 space-y-1">
+                  {preview.instructions.map((step, i) => <li key={i}>{step}</li>)}
+                </ol>
+              </div>
+              <div className="flex gap-2 pt-1">
+                <Button onClick={save} disabled={saving} className="flex-1">
+                  {saving ? <Spinner /> : '💾 이 레시피 저장'}
+                </Button>
+                <Button onClick={generate} variant="secondary" disabled={generating}>🔄 다시 생성</Button>
+              </div>
+            </div>
+          )}
+        </Card>
+      );
+    }
+
+    // ============ 저장된 레시피 목록 ============
+    function RecipeList({ recipes, loading, onToggleFav, onDelete, busyIds, filter, setFilter }) {
+      return (
+        <Card className="p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-bold text-slate-800">📒 저장된 레시피</h2>
+            <span className="text-xs text-slate-400">{recipes.length}개</span>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5">
+            {['전체', '⭐ 즐겨찾기', '쉬움', '보통', '어려움'].map(f => (
+              <button key={f} onClick={() => setFilter(f)}
+                className={`text-xs px-3 py-1.5 rounded-full border transition-colors
+                  ${filter === f ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-400'}`}>
+                {f}
+              </button>
+            ))}
+          </div>
+
+          {loading ? (
+            <div className="flex items-center justify-center gap-2 py-10 text-slate-400"><Spinner /> 불러오는 중...</div>
+          ) : recipes.length === 0 ? (
+            <div className="py-10 text-center text-slate-400 text-sm">조건에 맞는 레시피가 없어요.</div>
+          ) : (
+            <div className="space-y-3">
+              {recipes.map(r => (
+                <div key={r.id} className="border border-slate-200 rounded-xl p-4 space-y-2 animate-fade-in">
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="text-base font-bold text-slate-800">{r.title}</h3>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button onClick={() => onToggleFav(r)} disabled={busyIds.has(r.id)}
+                        title="즐겨찾기" className="text-xl leading-none disabled:opacity-40">
+                        {r.favorite ? '⭐' : '☆'}
+                      </button>
+                      <Button size="sm" variant="danger" disabled={busyIds.has(r.id)} onClick={() => onDelete(r)}>삭제</Button>
+                    </div>
+                  </div>
+                  <p className="text-sm text-slate-600">{r.description}</p>
+                  <div className="flex flex-wrap gap-2">
+                    <Badge className="bg-slate-100 text-slate-600">⏱️ {r.cookTime}분</Badge>
+                    <Badge className={DIFF_BADGE[r.difficulty] || 'bg-slate-100 text-slate-600'}>난이도 {r.difficulty}</Badge>
+                    <Badge className="bg-orange-100 text-orange-700">🔥 {r.calories} kcal</Badge>
+                    <Badge className="bg-emerald-100 text-emerald-700">{r.option}</Badge>
+                  </div>
+                  <details className="text-sm">
+                    <summary className="cursor-pointer text-slate-500 hover:text-slate-700 select-none">레시피 펼치기</summary>
+                    <div className="mt-2 space-y-2">
+                      <div className="flex flex-wrap gap-1">
+                        {r.ingredientsUsed.map((x, i) => <Badge key={i} className="bg-white border border-slate-200 text-slate-600">{x}</Badge>)}
+                      </div>
+                      <ol className="list-decimal list-inside text-slate-700 space-y-1">
+                        {r.instructions.map((step, i) => <li key={i}>{step}</li>)}
+                      </ol>
+                    </div>
+                  </details>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      );
+    }
+
+    // ============ App ============
+    function App() {
+      const [ingredients, setIngredients] = useState([]);
+      const [recipes, setRecipes] = useState([]);
+      const [loadingRecipes, setLoadingRecipes] = useState(true);
+      const [adding, setAdding] = useState(false);
+      const [busyIds, setBusyIds] = useState(() => new Set());
+      const [globalError, setGlobalError] = useState('');
+      const [filter, setFilter] = useState('전체');
+
+      const setBusy = useCallback((id, on) => {
+        setBusyIds(prev => { const n = new Set(prev); on ? n.add(id) : n.delete(id); return n; });
+      }, []);
+
+      const loadIngredients = useCallback(async () => {
+        try {
+          const { data } = await apiRequest('/ingredients');
+          setIngredients(Array.isArray(data) ? data : []);
+        } catch (e) { setGlobalError(`재료를 불러오지 못했습니다. ${e.message}`); }
+      }, []);
+
+      const loadRecipes = useCallback(async () => {
+        setLoadingRecipes(true);
+        try {
+          let q = '';
+          if (filter === '⭐ 즐겨찾기') q = '?favorite=true';
+          else if (['쉬움', '보통', '어려움'].includes(filter)) q = `?difficulty=${encodeURIComponent(filter)}`;
+          const { data } = await apiRequest(`/recipes${q}`);
+          setRecipes(Array.isArray(data) ? data : []);
+        } catch (e) {
+          setGlobalError(`레시피를 불러오지 못했습니다. ${e.message}`);
+        } finally {
+          setLoadingRecipes(false);
+        }
+      }, [filter]);
+
+      useEffect(() => { loadIngredients(); }, [loadIngredients]);
+      useEffect(() => { loadRecipes(); }, [loadRecipes]);
+
+      const addIngredient = useCallback(async (payload) => {
+        setAdding(true); setGlobalError('');
+        try {
+          const { data } = await apiRequest('/ingredients', { method: 'POST', body: JSON.stringify(payload) });
+          setIngredients(prev => [...prev, data]);
+        } catch (e) { setGlobalError(`재료 추가 실패: ${e.message}`); }
+        finally { setAdding(false); }
+      }, []);
+
+      const deleteIngredient = useCallback(async (ing) => {
+        setBusy(ing.id, true); setGlobalError('');
+        try {
+          await apiRequest(`/ingredients/${ing.id}`, { method: 'DELETE' });
+          setIngredients(prev => prev.filter(i => i.id !== ing.id));
+        } catch (e) { setGlobalError(`삭제 실패: ${e.message}`); }
+        finally { setBusy(ing.id, false); }
+      }, [setBusy]);
+
+      const toggleFav = useCallback(async (r) => {
+        setBusy(r.id, true); setGlobalError('');
+        try {
+          const { data } = await apiRequest(`/recipes/${r.id}`, { method: 'PATCH', body: JSON.stringify({ favorite: !r.favorite }) });
+          setRecipes(prev => prev.map(x => x.id === r.id ? data : x).sort((a, b) => (b.favorite - a.favorite) || (b.id - a.id)));
+        } catch (e) { setGlobalError(`즐겨찾기 변경 실패: ${e.message}`); }
+        finally { setBusy(r.id, false); }
+      }, [setBusy]);
+
+      const deleteRecipe = useCallback(async (r) => {
+        setBusy(r.id, true); setGlobalError('');
+        try {
+          await apiRequest(`/recipes/${r.id}`, { method: 'DELETE' });
+          setRecipes(prev => prev.filter(x => x.id !== r.id));
+        } catch (e) { setGlobalError(`삭제 실패: ${e.message}`); }
+        finally { setBusy(r.id, false); }
+      }, [setBusy]);
+
+      return (
+        <div className="min-h-screen px-4 py-8 sm:py-10">
+          <main className="w-full max-w-5xl mx-auto">
+            <header className="mb-6 text-center">
+              <h1 className="text-3xl font-bold text-slate-800">🧊 냉장고 → 🤖 AI 레시피</h1>
+              <p className="mt-1 text-sm text-slate-500">DB의 재료를 AI에게 보내 레시피를 만들고, 마음에 들면 저장하세요.</p>
+            </header>
+
+            <div className="mb-4"><Alert message={globalError} onClose={() => setGlobalError('')} /></div>
+
+            <div className="grid gap-5 lg:grid-cols-2">
+              <div className="space-y-5">
+                <IngredientPanel
+                  ingredients={ingredients} onAdd={addIngredient} onDelete={deleteIngredient}
+                  adding={adding} busyIds={busyIds} />
+                <GeneratePanel ingredients={ingredients} onSaved={loadRecipes} />
+              </div>
+              <RecipeList
+                recipes={recipes} loading={loadingRecipes} onToggleFav={toggleFav} onDelete={deleteRecipe}
+                busyIds={busyIds} filter={filter} setFilter={setFilter} />
+            </div>
+
+            <footer className="mt-8 text-center text-xs text-slate-400">
+              Express · PostgreSQL(Supabase) · CDN React · Claude API · week-4
+            </footer>
+          </main>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

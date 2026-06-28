@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🫶 익명 공감 게시판</title>
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <!-- ⚠️ 모든 CDN은 버전을 명시적으로 고정한다. Babel 은 반드시 7.x 로 고정. -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+  <style>
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    .animate-fade-in { animation: fadeIn 0.18s ease-out; }
+    @keyframes pop { 0% { transform: scale(1); } 40% { transform: scale(1.35); } 100% { transform: scale(1); } }
+    .animate-pop { animation: pop 0.3s ease-out; }
+  </style>
+</head>
+<body class="bg-rose-50">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+    const API_BASE_URL = '/api';
+
+    async function apiRequest(path, options = {}) {
+      const res = await fetch(`${API_BASE_URL}${path}`, {
+        headers: { 'Content-Type': 'application/json' },
+        ...options,
+      });
+      let body = null;
+      try { body = await res.json(); } catch (e) {}
+      if (!res.ok || !body || body.success === false) {
+        const msg = (body && (body.message || body.error)) || `요청 실패 (HTTP ${res.status})`;
+        throw new Error(msg);
+      }
+      return body;
+    }
+
+    const CATEGORIES = [
+      { key: '고민', emoji: '💭', color: 'bg-indigo-100 text-indigo-700 border-indigo-300', solid: 'bg-indigo-600' },
+      { key: '칭찬', emoji: '👏', color: 'bg-amber-100 text-amber-700 border-amber-300', solid: 'bg-amber-500' },
+      { key: '응원', emoji: '💪', color: 'bg-emerald-100 text-emerald-700 border-emerald-300', solid: 'bg-emerald-600' },
+    ];
+    const catMeta = (key) => CATEGORIES.find(c => c.key === key) || CATEGORIES[0];
+
+    function timeAgo(iso) {
+      const d = new Date(iso); const s = Math.floor((Date.now() - d.getTime()) / 1000);
+      if (s < 60) return '방금 전';
+      if (s < 3600) return `${Math.floor(s / 60)}분 전`;
+      if (s < 86400) return `${Math.floor(s / 3600)}시간 전`;
+      return `${Math.floor(s / 86400)}일 전`;
+    }
+
+    // ---- Design primitives ----
+    function Spinner({ className = '' }) {
+      return (
+        <svg className={`animate-spin h-5 w-5 ${className}`} viewBox="0 0 24 24" fill="none">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+        </svg>
+      );
+    }
+    function Alert({ message, onClose }) {
+      if (!message) return null;
+      return (
+        <div role="alert" className="flex items-start gap-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-4 py-3 animate-fade-in">
+          <span>⚠️</span><p className="flex-1">{message}</p>
+          {onClose && <button onClick={onClose} className="opacity-60 hover:opacity-100">✕</button>}
+        </div>
+      );
+    }
+
+    // ---- 글 작성 폼 ----
+    function ComposeForm({ onPost }) {
+      const [category, setCategory] = useState('고민');
+      const [content, setContent] = useState('');
+      const [posting, setPosting] = useState(false);
+      const [error, setError] = useState('');
+
+      const submit = async () => {
+        if (!content.trim() || posting) return;
+        setPosting(true); setError('');
+        try {
+          await onPost({ category, content: content.trim() });
+          setContent('');
+        } catch (e) { setError(e.message); }
+        finally { setPosting(false); }
+      };
+
+      return (
+        <div className="bg-white rounded-2xl shadow-sm p-5 space-y-3">
+          <h2 className="text-base font-bold text-slate-800">✍️ 익명으로 글쓰기</h2>
+          <div className="flex gap-2">
+            {CATEGORIES.map(c => (
+              <button key={c.key} onClick={() => setCategory(c.key)}
+                className={`flex-1 text-sm py-2 rounded-lg border transition-colors
+                  ${category === c.key ? `${c.solid} text-white border-transparent` : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'}`}>
+                {c.emoji} {c.key}
+              </button>
+            ))}
+          </div>
+          <textarea
+            value={content} onChange={e => setContent(e.target.value)} maxLength={1000}
+            placeholder="익명으로 마음을 남겨보세요. 고민도, 칭찬도, 응원도 좋아요." rows={3}
+            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 resize-none
+              focus:outline-none focus:ring-2 focus:ring-rose-400 focus:border-transparent" />
+          <Alert message={error} onClose={() => setError('')} />
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-400">{content.length}/1000 · 작성자는 익명이에요</span>
+            <button onClick={submit} disabled={posting || !content.trim()}
+              className="inline-flex items-center gap-2 bg-rose-500 text-white text-sm font-medium px-5 py-2 rounded-lg
+                hover:bg-rose-600 disabled:opacity-50 disabled:cursor-not-allowed">
+              {posting ? <Spinner /> : '등록하기'}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // ---- 답글 영역 ----
+    function Comments({ postId }) {
+      const [open, setOpen] = useState(false);
+      const [list, setList] = useState(null);
+      const [text, setText] = useState('');
+      const [busy, setBusy] = useState(false);
+
+      const load = useCallback(async () => {
+        const { data } = await apiRequest(`/posts/${postId}/comments`);
+        setList(data);
+      }, [postId]);
+
+      const toggle = async () => {
+        const next = !open; setOpen(next);
+        if (next && list === null) { try { await load(); } catch (e) { setList([]); } }
+      };
+
+      const add = async () => {
+        if (!text.trim() || busy) return;
+        setBusy(true);
+        try {
+          await apiRequest(`/posts/${postId}/comments`, { method: 'POST', body: JSON.stringify({ content: text.trim() }) });
+          setText(''); await load();
+        } catch (e) { /* ignore */ } finally { setBusy(false); }
+      };
+
+      return (
+        <div className="mt-3">
+          <button onClick={toggle} className="text-xs text-slate-500 hover:text-rose-500">
+            💬 답글 {open ? '닫기' : '보기/쓰기'}
+          </button>
+          {open && (
+            <div className="mt-2 space-y-2 animate-fade-in">
+              {list === null ? (
+                <div className="text-xs text-slate-400">불러오는 중...</div>
+              ) : list.length === 0 ? (
+                <div className="text-xs text-slate-400">첫 답글을 남겨보세요.</div>
+              ) : (
+                <ul className="space-y-1.5">
+                  {list.map(c => (
+                    <li key={c.id} className="text-sm bg-slate-50 rounded-lg px-3 py-2 text-slate-700">
+                      <span className="text-slate-400 mr-1">🙂</span>{c.content}
+                      <span className="ml-2 text-[11px] text-slate-400">{timeAgo(c.createdAt)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="flex gap-2">
+                <input value={text} onChange={e => setText(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') add(); }} placeholder="익명 답글 달기"
+                  className="flex-1 px-3 py-1.5 text-sm rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-rose-300" />
+                <button onClick={add} disabled={busy || !text.trim()}
+                  className="text-sm px-3 py-1.5 rounded-lg bg-slate-700 text-white disabled:opacity-50">등록</button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ---- 게시글 카드 ----
+    function PostCard({ post, rank, onLike, onDelete, liking }) {
+      const c = catMeta(post.category);
+      const isBest = rank === 0 && post.likes > 0;
+      return (
+        <div className={`bg-white rounded-2xl shadow-sm p-5 animate-fade-in border ${isBest ? 'border-rose-300' : 'border-transparent'}`}>
+          <div className="flex items-center gap-2 mb-2">
+            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${c.color}`}>{c.emoji} {post.category}</span>
+            {isBest && <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-rose-500 text-white">🏆 베스트</span>}
+            <span className="text-xs text-slate-400 ml-auto">{timeAgo(post.createdAt)}</span>
+            <button onClick={() => onDelete(post)} className="text-xs text-slate-300 hover:text-red-400" title="삭제">✕</button>
+          </div>
+          <p className="text-[15px] text-slate-800 whitespace-pre-wrap break-words leading-relaxed">{post.content}</p>
+          <div className="flex items-center gap-2 mt-3">
+            <button onClick={() => onLike(post)} disabled={liking}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-rose-200 text-rose-600
+                hover:bg-rose-50 active:scale-95 transition disabled:opacity-50 text-sm font-medium">
+              <span className={liking ? '' : ''}>🫶</span> 공감 <span className="font-bold tabular-nums">{post.likes}</span>
+            </button>
+            {post.commentCount > 0 && <span className="text-xs text-slate-400">💬 {post.commentCount}</span>}
+          </div>
+          <Comments postId={post.id} />
+        </div>
+      );
+    }
+
+    // ---- App ----
+    function App() {
+      const [posts, setPosts] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [sort, setSort] = useState('latest');     // latest | likes
+      const [filter, setFilter] = useState('전체');    // 전체 | 고민 | 칭찬 | 응원
+      const [busyIds, setBusyIds] = useState(() => new Set());
+      const [error, setError] = useState('');
+
+      const setBusy = useCallback((id, on) => {
+        setBusyIds(prev => { const n = new Set(prev); on ? n.add(id) : n.delete(id); return n; });
+      }, []);
+
+      const load = useCallback(async () => {
+        setLoading(true); setError('');
+        try {
+          const params = new URLSearchParams();
+          params.set('sort', sort);
+          if (filter !== '전체') params.set('category', filter);
+          const { data } = await apiRequest(`/posts?${params.toString()}`);
+          setPosts(Array.isArray(data) ? data : []);
+        } catch (e) {
+          setError(`게시글을 불러오지 못했습니다. ${e.message}`);
+        } finally {
+          setLoading(false);
+        }
+      }, [sort, filter]);
+
+      useEffect(() => { load(); }, [load]);
+
+      const addPost = useCallback(async (payload) => {
+        const { data } = await apiRequest('/posts', { method: 'POST', body: JSON.stringify(payload) });
+        // 새 글은 즉시 반영 (현재 정렬/필터에 맞게 재조회가 가장 정확하므로 reload)
+        await load();
+        return data;
+      }, [load]);
+
+      const likePost = useCallback(async (post) => {
+        setBusy(post.id, true);
+        try {
+          const { data } = await apiRequest(`/posts/${post.id}/like`, { method: 'POST' });
+          setPosts(prev => {
+            const updated = prev.map(p => p.id === post.id ? { ...p, likes: data.likes } : p);
+            // 공감순 정렬일 때는 즉시 재정렬
+            if (sort === 'likes') updated.sort((a, b) => (b.likes - a.likes) || (b.id - a.id));
+            return updated;
+          });
+        } catch (e) { setError(`공감 처리 실패: ${e.message}`); }
+        finally { setBusy(post.id, false); }
+      }, [setBusy, sort]);
+
+      const deletePost = useCallback(async (post) => {
+        setBusy(post.id, true);
+        try {
+          await apiRequest(`/posts/${post.id}`, { method: 'DELETE' });
+          setPosts(prev => prev.filter(p => p.id !== post.id));
+        } catch (e) { setError(`삭제 실패: ${e.message}`); }
+        finally { setBusy(post.id, false); }
+      }, [setBusy]);
+
+      return (
+        <div className="min-h-screen px-4 py-8 sm:py-10">
+          <main className="w-full max-w-xl mx-auto space-y-5">
+            <header className="text-center">
+              <h1 className="text-3xl font-bold text-slate-800">🫶 익명 공감 게시판</h1>
+              <p className="mt-1 text-sm text-slate-500">익명으로 마음을 나누고, 공감을 눌러 힘을 보태주세요.</p>
+            </header>
+
+            <ComposeForm onPost={addPost} />
+
+            {/* 정렬 + 필터 */}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex bg-white rounded-lg p-1 shadow-sm">
+                {[['latest', '🕒 최신순'], ['likes', '🔥 공감순']].map(([k, label]) => (
+                  <button key={k} onClick={() => setSort(k)}
+                    className={`text-sm px-3 py-1.5 rounded-md transition-colors ${sort === k ? 'bg-rose-500 text-white' : 'text-slate-500 hover:text-slate-700'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {['전체', '고민', '칭찬', '응원'].map(f => (
+                  <button key={f} onClick={() => setFilter(f)}
+                    className={`text-xs px-3 py-1.5 rounded-full border transition-colors
+                      ${filter === f ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-400'}`}>
+                    {f === '전체' ? '전체' : `${catMeta(f).emoji} ${f}`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <Alert message={error} onClose={() => setError('')} />
+
+            {/* 목록 */}
+            {loading ? (
+              <div className="flex items-center justify-center gap-2 py-12 text-slate-400"><Spinner /> 불러오는 중...</div>
+            ) : posts.length === 0 ? (
+              <div className="bg-white rounded-2xl shadow-sm py-12 text-center text-slate-400 text-sm">
+                아직 글이 없어요. 첫 글을 남겨보세요!
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {posts.map((p, i) => (
+                  <PostCard key={p.id} post={p} rank={sort === 'likes' ? i : -1}
+                    onLike={likePost} onDelete={deletePost} liking={busyIds.has(p.id)} />
+                ))}
+              </div>
+            )}
+
+            <footer className="text-center text-xs text-slate-400 pt-2">
+              Express · PostgreSQL(Supabase) · CDN React · week-4 · 공감은 DB UPDATE 로 저장돼요
+            </footer>
+          </main>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

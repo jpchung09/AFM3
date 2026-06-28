@@ -1,0 +1,9 @@
+{
+  "name": "계란",
+  "name_en": "egg",
+  "quantity": "6개",
+  "unit": "개",
+  "category": "냉장",
+  "calories_per_unit": 70,
+  "expiry": "2026-07-12"
+}

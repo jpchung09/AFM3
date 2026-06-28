@@ -1,0 +1,9 @@
+{
+  "name": "슬라이스 치즈",
+  "name_en": "sliced cheese",
+  "quantity": "5장",
+  "unit": "장",
+  "category": "냉장",
+  "calories_per_unit": 60,
+  "expiry": "2026-07-15"
+}

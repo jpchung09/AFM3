@@ -1,0 +1,9 @@
+{
+  "name": "라면",
+  "name_en": "instant ramen",
+  "quantity": "3봉지",
+  "unit": "봉지",
+  "category": "실온",
+  "calories_per_unit": 500,
+  "expiry": "2026-12-31"
+}

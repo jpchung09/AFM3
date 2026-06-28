@@ -1,0 +1,9 @@
+{
+  "name": "스팸",
+  "name_en": "spam",
+  "quantity": "1캔",
+  "unit": "캔",
+  "category": "실온",
+  "calories_per_unit": 330,
+  "expiry": "2027-03-01"
+}

@@ -1,0 +1,9 @@
+{
+  "name": "김치",
+  "name_en": "kimchi",
+  "quantity": "1포기",
+  "unit": "포기",
+  "category": "냉장",
+  "calories_per_unit": 30,
+  "expiry": "2026-08-01"
+}

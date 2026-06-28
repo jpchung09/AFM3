@@ -1,0 +1,9 @@
+{
+  "name": "밥",
+  "name_en": "cooked rice",
+  "quantity": "2공기",
+  "unit": "공기",
+  "category": "냉장",
+  "calories_per_unit": 300,
+  "expiry": "2026-06-30"
+}
