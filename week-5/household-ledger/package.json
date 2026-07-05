@@ -1,0 +1,13 @@
+{
+  "name": "household-ledger",
+  "version": "1.0.0",
+  "description": "가계부 앱 - 수입/지출 관리 (Express + PostgreSQL/Supabase + CDN React)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.22.0"
+  }
+}

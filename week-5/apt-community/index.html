@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🏢 우리 아파트 커뮤니티</title>
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <!-- ⚠️ 모든 CDN 버전 고정. Babel 은 7.x 로 고정 (8.x 는 인라인 text/babel 미지원). -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+  <style>
+    @keyframes fadeInUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .animate-fade-up { animation: fadeInUp .28s ease-out both; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+  </style>
+</head>
+<body class="bg-slate-100 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    // ========================================
+    // 상수 / 유틸
+    // ========================================
+    const API = '/api';
+    const CATEGORIES = [
+      { key: '공지',     emoji: '📢', color: 'bg-red-100 text-red-700 border-red-200' },
+      { key: '자유',     emoji: '💬', color: 'bg-slate-100 text-slate-700 border-slate-200' },
+      { key: '나눔장터', emoji: '🛒', color: 'bg-emerald-100 text-emerald-700 border-emerald-200' },
+      { key: '분실물',   emoji: '🔎', color: 'bg-amber-100 text-amber-700 border-amber-200' },
+      { key: '맛집',     emoji: '🍽️', color: 'bg-orange-100 text-orange-700 border-orange-200' },
+      { key: '반려동물', emoji: '🐾', color: 'bg-purple-100 text-purple-700 border-purple-200' },
+    ];
+    const catMeta = (k) => CATEGORIES.find((c) => c.key === k) || CATEGORIES[1];
+
+    const timeAgo = (iso) => {
+      const d = new Date(iso);
+      const diff = (Date.now() - d.getTime()) / 1000;
+      if (diff < 60) return '방금 전';
+      if (diff < 3600) return `${Math.floor(diff / 60)}분 전`;
+      if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
+      if (diff < 604800) return `${Math.floor(diff / 86400)}일 전`;
+      return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`;
+    };
+
+    // ========================================
+    // Auth 저장소 (localStorage)
+    // ========================================
+    const store = {
+      get token() { return localStorage.getItem('apt_token'); },
+      get user() { try { return JSON.parse(localStorage.getItem('apt_user')); } catch { return null; } },
+      set(token, user) {
+        localStorage.setItem('apt_token', token);
+        localStorage.setItem('apt_user', JSON.stringify(user));
+      },
+      clear() { localStorage.removeItem('apt_token'); localStorage.removeItem('apt_user'); },
+    };
+
+    async function apiFetch(pathname, options = {}) {
+      const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+      const token = store.token;
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(API + pathname, { ...options, headers });
+      const json = await res.json().catch(() => ({ success: false, message: '응답 오류' }));
+      if (res.status === 401) { store.clear(); location.hash = '#/login'; }
+      return json;
+    }
+
+    // ========================================
+    // 해시 라우팅
+    // ========================================
+    function useHashRoute() {
+      const [hash, setHash] = useState(window.location.hash || '#/');
+      useEffect(() => {
+        const on = () => setHash(window.location.hash || '#/');
+        window.addEventListener('hashchange', on);
+        return () => window.removeEventListener('hashchange', on);
+      }, []);
+      return hash;
+    }
+    const go = (path) => { window.location.hash = path; };
+
+    // ========================================
+    // 공통 UI
+    // ========================================
+    const inputCls =
+      'w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300';
+
+    function Header({ user, onLogout }) {
+      return (
+        <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
+          <div className="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between">
+            <button onClick={() => go('#/')} className="font-extrabold text-lg text-slate-800 flex items-center gap-1.5">
+              🏢 우리 아파트 커뮤니티
+            </button>
+            {user ? (
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-slate-500 hidden sm:inline">
+                  {user.aptDong ? `${user.aptDong}동 ` : ''}<b className="text-slate-700">{user.nickname}</b>님
+                </span>
+                <button onClick={onLogout} className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600">로그아웃</button>
+              </div>
+            ) : (
+              <button onClick={() => go('#/login')} className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-sm">로그인</button>
+            )}
+          </div>
+        </header>
+      );
+    }
+
+    // ========================================
+    // 로그인 / 회원가입
+    // ========================================
+    function AuthView({ mode, onAuth }) {
+      const isSignup = mode === 'signup';
+      const [form, setForm] = useState({ username: '', password: '', nickname: '', aptDong: '', aptHo: '' });
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState(false);
+      const upd = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+      const submit = async (e) => {
+        e.preventDefault();
+        setErr(''); setBusy(true);
+        const res = await apiFetch(isSignup ? '/auth/signup' : '/auth/login', {
+          method: 'POST',
+          body: JSON.stringify(form),
+        });
+        setBusy(false);
+        if (!res.success) { setErr(res.message || '오류가 발생했습니다.'); return; }
+        store.set(res.token, res.user);
+        onAuth(res.user);
+        go('#/');
+      };
+
+      return (
+        <div className="max-w-sm mx-auto px-4 py-12">
+          <div className="text-center mb-6">
+            <div className="text-4xl mb-2">🏢</div>
+            <h1 className="text-2xl font-extrabold text-slate-800">우리 아파트 커뮤니티</h1>
+            <p className="text-slate-500 text-sm mt-1">{isSignup ? '이웃과 함께하려면 가입하세요' : '로그인하고 이웃들과 소통하세요'}</p>
+          </div>
+
+          <form onSubmit={submit} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-3">
+            <div>
+              <label className="text-xs text-slate-500">아이디</label>
+              <input className={inputCls} value={form.username} onChange={upd('username')} placeholder="영문/숫자 3자 이상" autoComplete="username" />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500">비밀번호</label>
+              <input type="password" className={inputCls} value={form.password} onChange={upd('password')} placeholder="4자 이상" autoComplete={isSignup ? 'new-password' : 'current-password'} />
+            </div>
+            {isSignup && (
+              <>
+                <div>
+                  <label className="text-xs text-slate-500">닉네임</label>
+                  <input className={inputCls} value={form.nickname} onChange={upd('nickname')} placeholder="이웃에게 보일 이름" />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-xs text-slate-500">동 (선택)</label>
+                    <input className={inputCls} value={form.aptDong} onChange={upd('aptDong')} placeholder="101" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500">호 (선택)</label>
+                    <input className={inputCls} value={form.aptHo} onChange={upd('aptHo')} placeholder="1502" />
+                  </div>
+                </div>
+              </>
+            )}
+
+            {err && <div className="text-sm text-rose-600 bg-rose-50 rounded-lg px-3 py-2">{err}</div>}
+
+            <button type="submit" disabled={busy}
+              className="w-full py-2.5 rounded-xl bg-indigo-600 text-white font-semibold text-sm hover:bg-indigo-700 disabled:opacity-50">
+              {busy ? '처리 중…' : isSignup ? '가입하기' : '로그인'}
+            </button>
+          </form>
+
+          <p className="text-center text-sm text-slate-500 mt-4">
+            {isSignup ? '이미 계정이 있으신가요? ' : '아직 회원이 아니신가요? '}
+            <button onClick={() => go(isSignup ? '#/login' : '#/signup')} className="text-indigo-600 font-semibold">
+              {isSignup ? '로그인' : '회원가입'}
+            </button>
+          </p>
+        </div>
+      );
+    }
+
+    // ========================================
+    // 게시글 목록
+    // ========================================
+    function ListView() {
+      const [posts, setPosts] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [filter, setFilter] = useState('전체');
+
+      useEffect(() => {
+        apiFetch('/posts').then((r) => { if (r.success) setPosts(r.data); setLoading(false); });
+      }, []);
+
+      const shown = filter === '전체' ? posts : posts.filter((p) => p.category === filter);
+
+      return (
+        <div className="max-w-3xl mx-auto px-4 py-6">
+          <div className="flex items-center justify-between mb-4">
+            <h1 className="text-xl font-bold text-slate-800">📋 게시판</h1>
+            <button onClick={() => go('#/write')} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700">✏️ 글쓰기</button>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5 mb-4">
+            {['전체', ...CATEGORIES.map((c) => c.key)].map((k) => (
+              <button key={k} onClick={() => setFilter(k)}
+                className={`px-3 py-1 rounded-full text-xs border ${filter === k ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200'}`}>
+                {k === '전체' ? '전체' : `${catMeta(k).emoji} ${k}`}
+              </button>
+            ))}
+          </div>
+
+          {loading ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center text-slate-400">불러오는 중…</div>
+          ) : shown.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center text-slate-400">
+              아직 글이 없어요. 첫 글을 남겨보세요! ✍️
+            </div>
+          ) : (
+            <ul className="space-y-2">
+              {shown.map((p) => {
+                const m = catMeta(p.category);
+                return (
+                  <li key={p.id} onClick={() => go(`#/post/${p.id}`)}
+                    className="bg-white rounded-2xl border border-slate-200 p-4 hover:shadow-md cursor-pointer transition animate-fade-up">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={`text-[11px] px-1.5 py-0.5 rounded-full border ${m.color}`}>{m.emoji} {p.category}</span>
+                      {p.isMine && <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-600 border border-indigo-100">내 글</span>}
+                    </div>
+                    <h3 className="font-semibold text-slate-800 truncate">{p.title}</h3>
+                    <p className="text-sm text-slate-500 truncate mt-0.5">{p.content}</p>
+                    <div className="text-xs text-slate-400 mt-2 flex items-center gap-2">
+                      <span>👤 {p.author}{p.aptDong ? ` · ${p.aptDong}동` : ''}</span>
+                      <span>· {timeAgo(p.createdAt)}</span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      );
+    }
+
+    // ========================================
+    // 게시글 상세
+    // ========================================
+    function DetailView({ id }) {
+      const [post, setPost] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [notFound, setNotFound] = useState(false);
+
+      const load = useCallback(() => {
+        apiFetch(`/posts/${id}`).then((r) => {
+          if (r.success) setPost(r.data); else setNotFound(true);
+          setLoading(false);
+        });
+      }, [id]);
+      useEffect(load, [load]);
+
+      const del = async () => {
+        if (!window.confirm('이 글을 삭제할까요?')) return;
+        const r = await apiFetch(`/posts/${id}`, { method: 'DELETE' });
+        if (r.success) go('#/'); else alert(r.message);
+      };
+
+      if (loading) return <div className="max-w-3xl mx-auto px-4 py-10 text-center text-slate-400">불러오는 중…</div>;
+      if (notFound || !post) return (
+        <div className="max-w-3xl mx-auto px-4 py-10 text-center">
+          <p className="text-slate-500">게시글을 찾을 수 없습니다.</p>
+          <button onClick={() => go('#/')} className="mt-3 text-indigo-600">목록으로</button>
+        </div>
+      );
+
+      const m = catMeta(post.category);
+      return (
+        <div className="max-w-3xl mx-auto px-4 py-6">
+          <button onClick={() => go('#/')} className="text-sm text-slate-500 mb-3">← 목록으로</button>
+          <article className="bg-white rounded-2xl border border-slate-200 p-6 animate-fade-up">
+            <span className={`text-[11px] px-1.5 py-0.5 rounded-full border ${m.color}`}>{m.emoji} {post.category}</span>
+            <h1 className="text-2xl font-bold text-slate-800 mt-2">{post.title}</h1>
+            <div className="text-sm text-slate-400 mt-2 flex items-center gap-2 border-b border-slate-100 pb-4">
+              <span>👤 {post.author}{post.aptDong ? ` · ${post.aptDong}동` : ''}</span>
+              <span>· {timeAgo(post.createdAt)}</span>
+              {post.updatedAt !== post.createdAt && <span>· (수정됨)</span>}
+            </div>
+            <div className="text-slate-700 mt-4 whitespace-pre-wrap leading-relaxed">{post.content}</div>
+
+            {post.isMine && (
+              <div className="flex gap-2 mt-6 pt-4 border-t border-slate-100">
+                <button onClick={() => go(`#/edit/${post.id}`)} className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm">✏️ 수정</button>
+                <button onClick={del} className="px-4 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 text-sm">🗑️ 삭제</button>
+              </div>
+            )}
+          </article>
+        </div>
+      );
+    }
+
+    // ========================================
+    // 글쓰기 / 수정
+    // ========================================
+    function EditorView({ id }) {
+      const isEdit = id != null;
+      const [form, setForm] = useState({ title: '', content: '', category: '자유' });
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [ready, setReady] = useState(!isEdit);
+
+      useEffect(() => {
+        if (isEdit) {
+          apiFetch(`/posts/${id}`).then((r) => {
+            if (r.success) {
+              if (!r.data.isMine) { alert('본인 글만 수정할 수 있습니다.'); go('#/'); return; }
+              setForm({ title: r.data.title, content: r.data.content, category: r.data.category });
+              setReady(true);
+            } else { alert(r.message); go('#/'); }
+          });
+        }
+      }, [id, isEdit]);
+
+      const submit = async (e) => {
+        e.preventDefault();
+        setErr('');
+        if (!form.title.trim()) { setErr('제목을 입력해주세요.'); return; }
+        if (!form.content.trim()) { setErr('내용을 입력해주세요.'); return; }
+        setBusy(true);
+        const res = isEdit
+          ? await apiFetch(`/posts/${id}`, { method: 'PATCH', body: JSON.stringify(form) })
+          : await apiFetch('/posts', { method: 'POST', body: JSON.stringify(form) });
+        setBusy(false);
+        if (!res.success) { setErr(res.message || '오류가 발생했습니다.'); return; }
+        go(isEdit ? `#/post/${id}` : `#/post/${res.data.id}`);
+      };
+
+      if (!ready) return <div className="max-w-3xl mx-auto px-4 py-10 text-center text-slate-400">불러오는 중…</div>;
+
+      return (
+        <div className="max-w-3xl mx-auto px-4 py-6">
+          <h1 className="text-xl font-bold text-slate-800 mb-4">{isEdit ? '✏️ 글 수정' : '✏️ 새 글쓰기'}</h1>
+          <form onSubmit={submit} className="bg-white rounded-2xl border border-slate-200 p-6 space-y-3">
+            <div>
+              <label className="text-xs text-slate-500">카테고리</label>
+              <div className="flex flex-wrap gap-1.5 mt-1">
+                {CATEGORIES.map((c) => (
+                  <button type="button" key={c.key} onClick={() => setForm((f) => ({ ...f, category: c.key }))}
+                    className={`px-2.5 py-1 rounded-full text-xs border ${form.category === c.key ? c.color + ' ring-2 ring-offset-1 ring-slate-300' : 'bg-white text-slate-500 border-slate-200'}`}>
+                    {c.emoji} {c.key}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-slate-500">제목</label>
+              <input className={inputCls} value={form.title} onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))} placeholder="제목을 입력하세요" maxLength={100} />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500">내용</label>
+              <textarea className={inputCls + ' h-56 resize-none'} value={form.content} onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))} placeholder="이웃과 나누고 싶은 이야기를 적어보세요" />
+            </div>
+
+            {err && <div className="text-sm text-rose-600 bg-rose-50 rounded-lg px-3 py-2">{err}</div>}
+
+            <div className="flex gap-2">
+              <button type="submit" disabled={busy} className="flex-1 py-2.5 rounded-xl bg-indigo-600 text-white font-semibold text-sm hover:bg-indigo-700 disabled:opacity-50">
+                {busy ? '저장 중…' : isEdit ? '수정 완료' : '등록하기'}
+              </button>
+              <button type="button" onClick={() => go(isEdit ? `#/post/${id}` : '#/')} className="px-5 py-2.5 rounded-xl bg-slate-100 text-slate-600 text-sm">취소</button>
+            </div>
+          </form>
+        </div>
+      );
+    }
+
+    // ========================================
+    // App (라우터)
+    // ========================================
+    function App() {
+      const hash = useHashRoute();
+      const [user, setUser] = useState(store.user);
+      const path = hash.replace(/^#/, '') || '/';
+
+      const logout = () => { store.clear(); setUser(null); go('#/login'); };
+
+      // 토큰 있으면 최신 사용자 정보 동기화
+      useEffect(() => {
+        if (store.token) {
+          apiFetch('/auth/me').then((r) => { if (r.success) { setUser(r.user); store.set(store.token, r.user); } });
+        }
+      }, []);
+
+      const loggedIn = !!store.token;
+
+      // 인증 라우트
+      if (path === '/login') return <><Header user={user} onLogout={logout} /><AuthView mode="login" onAuth={setUser} /></>;
+      if (path === '/signup') return <><Header user={user} onLogout={logout} /><AuthView mode="signup" onAuth={setUser} /></>;
+
+      // 그 외는 로그인 필수
+      if (!loggedIn) { go('#/login'); return null; }
+
+      let view;
+      const mDetail = path.match(/^\/post\/(\d+)$/);
+      const mEdit = path.match(/^\/edit\/(\d+)$/);
+      if (path === '/write') view = <EditorView />;
+      else if (mEdit) view = <EditorView id={Number(mEdit[1])} />;
+      else if (mDetail) view = <DetailView id={Number(mDetail[1])} />;
+      else view = <ListView />;
+
+      return (
+        <>
+          <Header user={user} onLogout={logout} />
+          {view}
+          <footer className="max-w-3xl mx-auto px-4 py-8 text-center text-xs text-slate-400">
+            Express + PostgreSQL(Supabase) + JWT + CDN React · week-5 apt-community
+          </footer>
+        </>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

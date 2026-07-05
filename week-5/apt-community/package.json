@@ -1,0 +1,15 @@
+{
+  "name": "apt-community",
+  "version": "1.0.0",
+  "description": "아파트 커뮤니티 - 회원가입/로그인 + 게시글 CRUD (Express + PostgreSQL/Supabase + JWT + CDN React)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.22.0"
+  }
+}
