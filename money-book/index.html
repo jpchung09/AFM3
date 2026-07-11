@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>💵 머니북 · 나의 가계부</title>
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <!-- ⚠️ 모든 CDN 버전 고정. Babel 은 7.x 로 고정 (8.x 는 인라인 text/babel 미지원). -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+  <style>
+    @keyframes fadeInUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .animate-fade-up { animation: fadeInUp .28s ease-out both; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  </style>
+</head>
+<body class="bg-slate-100">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useCallback } = React;
+
+    // ========================================
+    // 상수 / 유틸리티
+    // ========================================
+    const API_BASE_URL = '/api';
+
+    // 지출 카테고리
+    const EXPENSE_CATEGORIES = [
+      { key: '식비',   emoji: '🍚', color: 'bg-orange-100 text-orange-700 border-orange-200', bar: 'bg-orange-400' },
+      { key: '교통',   emoji: '🚌', color: 'bg-sky-100 text-sky-700 border-sky-200',          bar: 'bg-sky-400' },
+      { key: '주거',   emoji: '🏠', color: 'bg-amber-100 text-amber-700 border-amber-200',    bar: 'bg-amber-400' },
+      { key: '구독료', emoji: '📺', color: 'bg-purple-100 text-purple-700 border-purple-200', bar: 'bg-purple-400' },
+      { key: '경조사', emoji: '🎁', color: 'bg-pink-100 text-pink-700 border-pink-200',       bar: 'bg-pink-400' },
+      { key: '문화',   emoji: '🎬', color: 'bg-indigo-100 text-indigo-700 border-indigo-200', bar: 'bg-indigo-400' },
+      { key: '의료',   emoji: '💊', color: 'bg-red-100 text-red-700 border-red-200',          bar: 'bg-red-400' },
+      { key: '기타',   emoji: '📦', color: 'bg-slate-100 text-slate-700 border-slate-200',    bar: 'bg-slate-400' },
+    ];
+    // 수입 카테고리
+    const INCOME_CATEGORIES = [
+      { key: '급여', emoji: '💼', color: 'bg-emerald-100 text-emerald-700 border-emerald-200', bar: 'bg-emerald-400' },
+      { key: '용돈', emoji: '💸', color: 'bg-teal-100 text-teal-700 border-teal-200',          bar: 'bg-teal-400' },
+      { key: '금융', emoji: '📈', color: 'bg-green-100 text-green-700 border-green-200',        bar: 'bg-green-400' },
+      { key: '기타', emoji: '📦', color: 'bg-slate-100 text-slate-700 border-slate-200',        bar: 'bg-slate-400' },
+    ];
+
+    const catMeta = (type, key) => {
+      const list = type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+      return list.find((c) => c.key === key) || { key, emoji: '📦', color: 'bg-slate-100 text-slate-700 border-slate-200', bar: 'bg-slate-400' };
+    };
+
+    const won = (n) => (n || 0).toLocaleString('ko-KR') + '원';
+    const todayStr = () => {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+
+    // ========================================
+    // API
+    // ========================================
+    const api = {
+      list: () => fetch(`${API_BASE_URL}/entries`).then((r) => r.json()),
+      summary: () => fetch(`${API_BASE_URL}/summary`).then((r) => r.json()),
+      create: (body) =>
+        fetch(`${API_BASE_URL}/entries`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).then((r) => r.json()),
+      remove: (id) =>
+        fetch(`${API_BASE_URL}/entries/${id}`, { method: 'DELETE' }).then((r) => r.json()),
+      getProfile: () => fetch(`${API_BASE_URL}/profile`).then((r) => r.json()),
+      saveProfile: (body) =>
+        fetch(`${API_BASE_URL}/profile`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).then((r) => r.json()),
+      uploadAvatar: (fileName, fileBase64) =>
+        fetch(`${API_BASE_URL}/profile/avatar`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileName, fileBase64 }),
+        }).then((r) => r.json()),
+    };
+
+    // 파일 → data URL(base64) 변환
+    const fileToDataUrl = (file) =>
+      new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+    // ========================================
+    // 요약 카드
+    // ========================================
+    function SummaryCards({ summary }) {
+      const s = summary || { totalIncome: 0, totalExpense: 0, balance: 0 };
+      const cards = [
+        { label: '총 수입', value: s.totalIncome, cls: 'text-emerald-600', emoji: '📥' },
+        { label: '총 지출', value: s.totalExpense, cls: 'text-rose-600', emoji: '📤' },
+        { label: '잔액', value: s.balance, cls: s.balance >= 0 ? 'text-slate-800' : 'text-rose-600', emoji: '💰' },
+      ];
+      return (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {cards.map((c) => (
+            <div key={c.label} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
+              <div className="text-sm text-slate-500 flex items-center gap-1">
+                <span>{c.emoji}</span>{c.label}
+              </div>
+              <div className={`mt-1 text-2xl font-bold ${c.cls}`}>{won(c.value)}</div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ========================================
+    // 카테고리별 합계
+    // ========================================
+    function CategoryBreakdown({ summary }) {
+      const cats = (summary?.categories || []);
+      const expense = cats.filter((c) => c.type === 'expense');
+      const income = cats.filter((c) => c.type === 'income');
+      const maxExpense = Math.max(1, ...expense.map((c) => c.total));
+      const maxIncome = Math.max(1, ...income.map((c) => c.total));
+
+      const Section = ({ title, items, max }) => (
+        <div>
+          <div className="text-sm font-semibold text-slate-600 mb-2">{title}</div>
+          {items.length === 0 ? (
+            <div className="text-sm text-slate-400 py-2">내역이 없습니다.</div>
+          ) : (
+            <div className="space-y-2">
+              {items.map((c) => {
+                const m = catMeta(c.type, c.category);
+                return (
+                  <div key={c.type + c.category}>
+                    <div className="flex items-center justify-between text-sm mb-1">
+                      <span className="flex items-center gap-1.5">
+                        <span>{m.emoji}</span>
+                        <span className="font-medium text-slate-700">{c.category}</span>
+                        <span className="text-slate-400">· {c.count}건</span>
+                      </span>
+                      <span className="font-semibold text-slate-800">{won(c.total)}</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                      <div className={`h-full rounded-full ${m.bar}`} style={{ width: `${(c.total / max) * 100}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+
+      return (
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-5">
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">📊 카테고리별 합계</h2>
+          <Section title="지출" items={expense} max={maxExpense} />
+          <Section title="수입" items={income} max={maxIncome} />
+        </div>
+      );
+    }
+
+    // ========================================
+    // 입력 폼
+    // ========================================
+    function EntryForm({ onAdd }) {
+      const [type, setType] = useState('expense');
+      const [date, setDate] = useState(todayStr());
+      const [amount, setAmount] = useState('');
+      const [category, setCategory] = useState('식비');
+      const [memo, setMemo] = useState('');
+      const [saving, setSaving] = useState(false);
+      const [error, setError] = useState('');
+
+      const categories = type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+
+      const switchType = (t) => {
+        setType(t);
+        setCategory(t === 'income' ? '급여' : '식비');
+      };
+
+      const submit = async (e) => {
+        e.preventDefault();
+        setError('');
+        const amt = Number(amount);
+        if (!Number.isFinite(amt) || amt <= 0) {
+          setError('금액을 올바르게 입력하세요.');
+          return;
+        }
+        setSaving(true);
+        const res = await api.create({ type, date, amount: amt, category, memo });
+        setSaving(false);
+        if (!res.success) {
+          setError(res.message || '등록에 실패했습니다.');
+          return;
+        }
+        setAmount('');
+        setMemo('');
+        onAdd();
+      };
+
+      const inputCls =
+        'w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-300';
+
+      return (
+        <form onSubmit={submit} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-3">
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">✍️ 내역 등록</h2>
+
+          <div className="grid grid-cols-2 gap-2">
+            <button type="button" onClick={() => switchType('expense')}
+              className={`py-2 rounded-xl text-sm font-semibold border transition ${type === 'expense' ? 'bg-rose-500 text-white border-rose-500' : 'bg-white text-slate-500 border-slate-200'}`}>
+              📤 지출
+            </button>
+            <button type="button" onClick={() => switchType('income')}
+              className={`py-2 rounded-xl text-sm font-semibold border transition ${type === 'income' ? 'bg-emerald-500 text-white border-emerald-500' : 'bg-white text-slate-500 border-slate-200'}`}>
+              📥 수입
+            </button>
+          </div>
+
+          <div>
+            <label className="text-xs text-slate-500">날짜</label>
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={inputCls} />
+          </div>
+
+          <div>
+            <label className="text-xs text-slate-500">금액 (원)</label>
+            <input type="number" min="0" step="1" inputMode="numeric" value={amount}
+              onChange={(e) => setAmount(e.target.value)} placeholder="예: 12000" className={inputCls} />
+          </div>
+
+          <div>
+            <label className="text-xs text-slate-500">카테고리</label>
+            <div className="flex flex-wrap gap-1.5 mt-1">
+              {categories.map((c) => (
+                <button type="button" key={c.key} onClick={() => setCategory(c.key)}
+                  className={`px-2.5 py-1 rounded-full text-xs border transition ${category === c.key ? c.color + ' ring-2 ring-offset-1 ring-slate-300' : 'bg-white text-slate-500 border-slate-200'}`}>
+                  {c.emoji} {c.key}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="text-xs text-slate-500">메모</label>
+            <input type="text" value={memo} onChange={(e) => setMemo(e.target.value)}
+              placeholder="예: 점심 김치찌개" className={inputCls} maxLength={100} />
+          </div>
+
+          {error && <div className="text-sm text-rose-600 bg-rose-50 rounded-lg px-3 py-2">{error}</div>}
+
+          <button type="submit" disabled={saving}
+            className="w-full py-2.5 rounded-xl bg-slate-800 text-white font-semibold text-sm hover:bg-slate-700 disabled:opacity-50 transition">
+            {saving ? '저장 중…' : '등록하기'}
+          </button>
+        </form>
+      );
+    }
+
+    // ========================================
+    // 내역 목록
+    // ========================================
+    function EntryList({ entries, onDelete }) {
+      if (entries.length === 0) {
+        return (
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-10 text-center text-slate-400">
+            아직 등록된 내역이 없습니다. 왼쪽에서 첫 내역을 추가해보세요! 📝
+          </div>
+        );
+      }
+      return (
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+            <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">🧾 전체 내역</h2>
+            <span className="text-sm text-slate-400">{entries.length}건</span>
+          </div>
+          <ul className="divide-y divide-slate-100 max-h-[560px] overflow-y-auto">
+            {entries.map((e) => {
+              const m = catMeta(e.type, e.category);
+              const isIncome = e.type === 'income';
+              return (
+                <li key={e.id} className="px-5 py-3 flex items-center gap-3 hover:bg-slate-50 animate-fade-up">
+                  <div className={`shrink-0 w-10 h-10 rounded-xl grid place-items-center text-lg border ${m.color}`}>
+                    {m.emoji}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-slate-800 truncate">{e.memo || e.category}</span>
+                      <span className={`shrink-0 text-[11px] px-1.5 py-0.5 rounded-full border ${m.color}`}>{e.category}</span>
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">{e.date}</div>
+                  </div>
+                  <div className={`shrink-0 font-bold ${isIncome ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {isIncome ? '+' : '-'}{won(e.amount)}
+                  </div>
+                  <button onClick={() => onDelete(e.id)}
+                    className="shrink-0 text-slate-300 hover:text-rose-500 transition text-lg" title="삭제">
+                    ✕
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      );
+    }
+
+    // ========================================
+    // 프로필 페이지
+    // ========================================
+    function ProfilePage() {
+      const [profile, setProfile] = useState(null);
+      const [name, setName] = useState('');
+      const [email, setEmail] = useState('');
+      const [bio, setBio] = useState('');
+      const [loading, setLoading] = useState(true);
+      const [saving, setSaving] = useState(false);
+      const [uploading, setUploading] = useState(false);
+      const [msg, setMsg] = useState('');
+      const [error, setError] = useState('');
+      const fileRef = React.useRef(null);
+
+      const load = useCallback(async () => {
+        try {
+          const res = await api.getProfile();
+          if (res.success) {
+            setProfile(res.data);
+            setName(res.data.name || '');
+            setEmail(res.data.email || '');
+            setBio(res.data.bio || '');
+          }
+        } catch {
+          setError('프로필을 불러오지 못했습니다.');
+        } finally {
+          setLoading(false);
+        }
+      }, []);
+
+      useEffect(() => { load(); }, [load]);
+
+      const flash = (m) => { setMsg(m); setTimeout(() => setMsg(''), 2500); };
+
+      const saveInfo = async (e) => {
+        e.preventDefault();
+        setError('');
+        setSaving(true);
+        const res = await api.saveProfile({ name, email, bio });
+        setSaving(false);
+        if (res.success) { setProfile(res.data); flash('프로필이 저장되었습니다. ✅'); }
+        else setError(res.message || '저장에 실패했습니다.');
+      };
+
+      const onPickFile = async (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        setError('');
+        if (!file.type.startsWith('image/')) { setError('이미지 파일만 업로드할 수 있습니다.'); return; }
+        if (file.size > 8 * 1024 * 1024) { setError('이미지는 8MB 이하만 가능합니다.'); return; }
+
+        setUploading(true);
+        try {
+          const dataUrl = await fileToDataUrl(file);
+          const res = await api.uploadAvatar(file.name, dataUrl);
+          if (res.success) { setProfile((p) => ({ ...(p || {}), avatarUrl: res.data.avatarUrl })); flash('이미지가 업로드되었습니다. 🖼️'); }
+          else setError(res.message || '이미지 업로드에 실패했습니다.');
+        } catch {
+          setError('이미지 업로드 중 오류가 발생했습니다.');
+        } finally {
+          setUploading(false);
+          if (fileRef.current) fileRef.current.value = '';
+        }
+      };
+
+      const initial = (name || '사용자').trim().charAt(0) || '👤';
+      const inputCls =
+        'w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-300';
+
+      if (loading) {
+        return <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-10 text-center text-slate-400">불러오는 중…</div>;
+      }
+
+      return (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          {/* 아바타 카드 */}
+          <div className="lg:col-span-1">
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col items-center text-center">
+              <div className="relative">
+                {profile?.avatarUrl ? (
+                  <img src={profile.avatarUrl} alt="프로필 이미지"
+                    className="w-32 h-32 rounded-full object-cover border-4 border-slate-100 shadow" />
+                ) : (
+                  <div className="w-32 h-32 rounded-full bg-gradient-to-br from-slate-200 to-slate-300 grid place-items-center text-4xl font-bold text-slate-500 border-4 border-slate-100 shadow">
+                    {initial}
+                  </div>
+                )}
+                {uploading && (
+                  <div className="absolute inset-0 rounded-full bg-black/40 grid place-items-center text-white text-xs">업로드 중…</div>
+                )}
+              </div>
+              <div className="mt-4 text-lg font-bold text-slate-800">{profile?.name || '사용자'}</div>
+              <div className="text-sm text-slate-500">{profile?.email || '이메일 미설정'}</div>
+
+              <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={onPickFile} />
+              <button type="button" disabled={uploading} onClick={() => fileRef.current && fileRef.current.click()}
+                className="mt-5 w-full py-2.5 rounded-xl bg-slate-800 text-white font-semibold text-sm hover:bg-slate-700 disabled:opacity-50 transition">
+                {uploading ? '업로드 중…' : '📷 프로필 이미지 업로드'}
+              </button>
+              <p className="mt-2 text-[11px] text-slate-400">JPG·PNG·GIF · 최대 8MB · ImageKit에 저장됩니다</p>
+            </div>
+          </div>
+
+          {/* 정보 편집 카드 */}
+          <div className="lg:col-span-2">
+            <form onSubmit={saveInfo} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+              <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">👤 내 정보</h2>
+
+              {msg && <div className="text-sm text-emerald-700 bg-emerald-50 rounded-lg px-3 py-2">{msg}</div>}
+              {error && <div className="text-sm text-rose-600 bg-rose-50 rounded-lg px-3 py-2">{error}</div>}
+
+              <div>
+                <label className="text-xs text-slate-500">이름</label>
+                <input type="text" value={name} onChange={(e) => setName(e.target.value)}
+                  placeholder="이름" className={inputCls} maxLength={40} />
+              </div>
+              <div>
+                <label className="text-xs text-slate-500">이메일</label>
+                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com" className={inputCls} maxLength={100} />
+              </div>
+              <div>
+                <label className="text-xs text-slate-500">소개</label>
+                <textarea value={bio} onChange={(e) => setBio(e.target.value)} rows={4}
+                  placeholder="자기소개를 입력하세요" className={inputCls + ' resize-none'} maxLength={300} />
+              </div>
+
+              <button type="submit" disabled={saving}
+                className="w-full py-2.5 rounded-xl bg-emerald-600 text-white font-semibold text-sm hover:bg-emerald-500 disabled:opacity-50 transition">
+                {saving ? '저장 중…' : '정보 저장'}
+              </button>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    // ========================================
+    // App
+    // ========================================
+    // 해시 기반 라우팅 (#/profile 이면 프로필, 그 외 가계부)
+    function useHashRoute() {
+      const [route, setRoute] = useState(window.location.hash.replace(/^#/, '') || '/');
+      useEffect(() => {
+        const onChange = () => setRoute(window.location.hash.replace(/^#/, '') || '/');
+        window.addEventListener('hashchange', onChange);
+        return () => window.removeEventListener('hashchange', onChange);
+      }, []);
+      return route;
+    }
+
+    function NavBar({ route }) {
+      const tabs = [
+        { href: '#/', key: '/', label: '가계부', emoji: '📒' },
+        { href: '#/profile', key: '/profile', label: '프로필', emoji: '👤' },
+      ];
+      return (
+        <nav className="flex items-center gap-1 bg-white rounded-2xl shadow-sm border border-slate-200 p-1 mb-6">
+          {tabs.map((t) => {
+            const active = route === t.key;
+            return (
+              <a key={t.key} href={t.href}
+                className={`flex-1 text-center py-2 rounded-xl text-sm font-semibold transition ${active ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>
+                {t.emoji} {t.label}
+              </a>
+            );
+          })}
+        </nav>
+      );
+    }
+
+    function LedgerPage() {
+      const [entries, setEntries] = useState([]);
+      const [summary, setSummary] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState('');
+
+      const refresh = useCallback(async () => {
+        try {
+          const [l, s] = await Promise.all([api.list(), api.summary()]);
+          if (l.success) setEntries(l.data);
+          if (s.success) setSummary(s.data);
+          setError('');
+        } catch (err) {
+          setError('서버에 연결하지 못했습니다.');
+        } finally {
+          setLoading(false);
+        }
+      }, []);
+
+      useEffect(() => { refresh(); }, [refresh]);
+
+      const handleDelete = async (id) => {
+        if (!window.confirm('이 내역을 삭제할까요?')) return;
+        const res = await api.remove(id);
+        if (res.success) refresh();
+        else alert(res.message || '삭제 실패');
+      };
+
+      return (
+        <React.Fragment>
+          {error && <div className="mb-4 text-sm text-rose-600 bg-rose-50 rounded-lg px-4 py-3">{error}</div>}
+
+          <div className="mb-4"><SummaryCards summary={summary} /></div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div className="lg:col-span-1 space-y-4">
+              <EntryForm onAdd={refresh} />
+              <CategoryBreakdown summary={summary} />
+            </div>
+            <div className="lg:col-span-2">
+              {loading ? (
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-10 text-center text-slate-400">불러오는 중…</div>
+              ) : (
+                <EntryList entries={entries} onDelete={handleDelete} />
+              )}
+            </div>
+          </div>
+        </React.Fragment>
+      );
+    }
+
+    function App() {
+      const route = useHashRoute();
+      const isProfile = route === '/profile';
+
+      return (
+        <div className="max-w-5xl mx-auto px-4 py-8">
+          <header className="mb-6">
+            <h1 className="text-3xl font-extrabold text-slate-800 flex items-center gap-2">💵 머니북</h1>
+            <p className="text-slate-500 mt-1 text-sm">
+              {isProfile
+                ? '프로필 정보를 관리하고 이미지를 업로드하세요. (이미지는 ImageKit에 저장됩니다)'
+                : '수입·지출을 기록하고 카테고리별로 한눈에 확인하세요. (데이터는 Supabase DB에 저장됩니다)'}
+            </p>
+          </header>
+
+          <NavBar route={route} />
+
+          {isProfile ? <ProfilePage /> : <LedgerPage />}
+
+          <footer className="mt-8 text-center text-xs text-slate-400">
+            Express + PostgreSQL(Supabase) + ImageKit + CDN React · money-book
+          </footer>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

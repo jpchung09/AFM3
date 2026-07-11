@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🛍️ 마이샵 · TossPayments 결제</title>
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <!-- TossPayments 결제위젯 SDK v2 -->
+  <script src="https://js.tosspayments.com/v2/standard"></script>
+  <!-- ⚠️ CDN 버전 고정. Babel 7.x (8.x 는 인라인 text/babel 미지원). -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+  <style>
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+  </style>
+</head>
+<body class="bg-slate-100">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    const won = (n) => (n || 0).toLocaleString('ko-KR') + '원';
+
+    const api = {
+      config: () => fetch('/api/config').then((r) => r.json()),
+      products: () => fetch('/api/products').then((r) => r.json()),
+      createOrder: (productId) =>
+        fetch('/api/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ productId }),
+        }).then((r) => r.json()),
+    };
+
+    function App() {
+      const [products, setProducts] = useState([]);
+      const [selected, setSelected] = useState(null);
+      const [ready, setReady] = useState(false);     // 위젯 렌더 완료 여부
+      const [paying, setPaying] = useState(false);
+      const [error, setError] = useState('');
+
+      const widgetsRef = useRef(null);
+      const renderedRef = useRef(false);             // 위젯 1회 렌더 가드
+
+      // 상품 로드
+      useEffect(() => {
+        api.products().then((res) => {
+          if (res.success) {
+            setProducts(res.data);
+            if (res.data.length) setSelected(res.data[0]);
+          }
+        });
+      }, []);
+
+      // 위젯 초기화 + 최초 1회 렌더 (첫 상품이 정해지면)
+      useEffect(() => {
+        if (!selected || renderedRef.current) return;
+
+        (async () => {
+          try {
+            const cfg = await api.config();
+            const clientKey = cfg.success ? cfg.data.clientKey : null;
+            if (!clientKey) { setError('클라이언트 키를 불러오지 못했습니다.'); return; }
+
+            const tossPayments = TossPayments(clientKey);
+            // 비회원(익명) 결제
+            const widgets = tossPayments.widgets({ customerKey: TossPayments.ANONYMOUS });
+            widgetsRef.current = widgets;
+
+            await widgets.setAmount({ currency: 'KRW', value: selected.price });
+            await widgets.renderPaymentMethods({ selector: '#payment-method', variantKey: 'DEFAULT' });
+            await widgets.renderAgreement({ selector: '#agreement', variantKey: 'AGREEMENT' });
+
+            renderedRef.current = true;
+            setReady(true);
+          } catch (e) {
+            console.error(e);
+            setError('결제위젯을 불러오지 못했습니다: ' + (e.message || e));
+          }
+        })();
+      }, [selected]);
+
+      // 상품 변경 시: 위젯 재렌더 없이 금액만 갱신
+      const pickProduct = useCallback(async (p) => {
+        setSelected(p);
+        setError('');
+        if (widgetsRef.current && renderedRef.current) {
+          try { await widgetsRef.current.setAmount({ currency: 'KRW', value: p.price }); }
+          catch (e) { console.error(e); }
+        }
+      }, []);
+
+      const pay = async () => {
+        if (!widgetsRef.current || !selected) return;
+        setError('');
+        setPaying(true);
+        try {
+          // 서버에서 주문 생성 → orderId 발급 (금액도 서버가 확정)
+          const orderRes = await api.createOrder(selected.id);
+          if (!orderRes.success) { setError(orderRes.message || '주문 생성 실패'); setPaying(false); return; }
+          const { orderId, orderName } = orderRes.data;
+
+          // 결제 요청 (successUrl/failUrl 은 hash 없는 실제 경로 → 파라미터 유실 방지)
+          await widgetsRef.current.requestPayment({
+            orderId,
+            orderName,
+            successUrl: window.location.origin + '/success.html',
+            failUrl: window.location.origin + '/fail.html',
+            customerEmail: 'customer@example.com',
+            customerName: '테스트 구매자',
+          });
+          // requestPayment 성공 시 토스가 리다이렉트하므로 이후 코드는 실행되지 않음
+        } catch (e) {
+          // 사용자가 취소하거나 결제창에서 실패한 경우
+          if (e.code === 'USER_CANCEL') setError('결제를 취소했습니다.');
+          else setError(e.message || '결제 요청 중 오류가 발생했습니다.');
+          setPaying(false);
+        }
+      };
+
+      return (
+        <div className="max-w-5xl mx-auto px-4 py-8">
+          <header className="mb-6 flex items-end justify-between">
+            <div>
+              <h1 className="text-3xl font-extrabold text-slate-800 flex items-center gap-2">🛍️ 마이샵</h1>
+              <p className="text-slate-500 mt-1 text-sm">TossPayments 결제위젯으로 실제(테스트) 결제를 진행합니다.</p>
+            </div>
+            <span className="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-700 border border-amber-200">테스트 상점</span>
+          </header>
+
+          {error && <div className="mb-4 text-sm text-rose-600 bg-rose-50 rounded-lg px-4 py-3">{error}</div>}
+
+          <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+            {/* 상품 목록 */}
+            <div className="lg:col-span-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {products.map((p) => {
+                  const active = selected && selected.id === p.id;
+                  return (
+                    <button key={p.id} onClick={() => pickProduct(p)}
+                      className={`text-left bg-white rounded-2xl border p-4 transition shadow-sm hover:shadow ${active ? 'border-slate-800 ring-2 ring-slate-800/10' : 'border-slate-200'}`}>
+                      <div className="flex items-center gap-3">
+                        <div className="w-12 h-12 rounded-xl bg-slate-100 grid place-items-center text-2xl">{p.emoji}</div>
+                        <div className="flex-1 min-w-0">
+                          <div className="font-bold text-slate-800">{p.name}</div>
+                          <div className="text-xs text-slate-400 truncate">{p.desc}</div>
+                        </div>
+                      </div>
+                      <div className="mt-3 flex items-center justify-between">
+                        <span className="font-bold text-slate-900">{won(p.price)}</span>
+                        {active && <span className="text-xs text-slate-800 font-semibold">선택됨 ✓</span>}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 결제 패널 */}
+            <div className="lg:col-span-2">
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-4 sticky top-6">
+                <h2 className="text-lg font-bold text-slate-800">💳 결제</h2>
+
+                {selected && (
+                  <div className="flex items-center justify-between text-sm bg-slate-50 rounded-xl px-3 py-2">
+                    <span className="text-slate-600">{selected.emoji} {selected.name}</span>
+                    <span className="font-bold text-slate-900">{won(selected.price)}</span>
+                  </div>
+                )}
+
+                {/* 결제수단 / 약관 위젯 (1회만 렌더) */}
+                <div id="payment-method"></div>
+                <div id="agreement"></div>
+
+                <button onClick={pay} disabled={!ready || paying}
+                  className="w-full py-3 rounded-xl bg-slate-900 text-white font-bold text-sm hover:bg-slate-800 disabled:opacity-50 transition">
+                  {!ready ? '결제위젯 불러오는 중…' : paying ? '결제창 여는 중…' : `${won(selected ? selected.price : 0)} 결제하기`}
+                </button>
+
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  테스트 카드: 아무 16자리 번호 · 미래 유효기간 · 임의 CVC/비밀번호.<br/>
+                  실제 청구는 발생하지 않습니다.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <footer className="mt-8 text-center text-xs text-slate-400">
+            Express + PostgreSQL(Supabase) + TossPayments 결제위젯 · my-shop
+          </footer>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

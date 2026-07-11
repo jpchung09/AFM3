@@ -1,0 +1,13 @@
+{
+  "name": "my-shop",
+  "version": "1.0.0",
+  "description": "마이샵 - TossPayments 결제위젯 실제 결제 (Express + PostgreSQL/Supabase + CDN React)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.22.0"
+  }
+}
