@@ -1,13 +1,21 @@
 {
-  "name": "my-shop",
+  "name": "sole-shop-server",
   "version": "1.0.0",
-  "description": "마이샵 - TossPayments 결제위젯 실제 결제 (Express + PostgreSQL/Supabase + CDN React)",
+  "description": "SOLE 신발 쇼핑몰 백엔드 — Express + PostgreSQL(Supabase) 인증 · 주문/결제 내역 API",
+  "private": true,
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
-    "express": "^5.1.0",
-    "pg": "^8.22.0"
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.13.1"
   }
 }

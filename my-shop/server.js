@@ -1,224 +1,440 @@
-const express = require('express');
+// ============================================================================
+// SOLE Shop — Backend Server (server.js)
+// Express + PostgreSQL(Supabase) · JWT auth · order/payment history
+//
+// The single source of backend truth for this 3-file style project
+// (server.js + index.html). Runs locally via `node server.js` and is also
+// safe to export for a serverless host (Vercel) via module.exports.
+// ============================================================================
+require('dotenv').config();
+
+const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { Pool } = require('pg');
+const express = require('express');
+const { Pool, types } = require('pg');
+const jwt = require('jsonwebtoken');
 
-// .env 파일이 있으면 환경변수로 로드 (Node 20.6+ 내장 기능)
-try { process.loadEnvFile(path.join(__dirname, '.env')); } catch { /* .env 없으면 무시 */ }
+// bcryptjs (pure-JS, as requested). Resilient require so a missing native
+// binary can never block boot.
+let bcrypt;
+try { bcrypt = require('bcryptjs'); } catch { bcrypt = require('bcrypt'); }
 
-const app = express();
+// pg returns BIGINT/int8 (oid 20) as a *string* for precision safety. Our
+// amounts (KRW) are well under 2^53, so parse them to real numbers — keeps
+// JSON responses numeric (won() formatting on the client depends on it).
+types.setTypeParser(20, (v) => (v === null ? null : parseInt(v, 10)));
+
+// ============================================================================
+// 1. Config
+// ============================================================================
 const PORT = process.env.PORT || 3000;
+const DATABASE_URL = (process.env.DATABASE_URL || '').trim(); // .trim() guards trailing newlines
 
-// --- TossPayments 키 ---
-// 클라이언트 키: 프론트로 내려가는 공개 키. 시크릿 키: 서버 전용(절대 노출 금지).
+// --- JWT secret: read from .env, otherwise self-provision a strong random
+// secret and persist it (never hardcode a secret). ---
+let JWT_SECRET = (process.env.JWT_SECRET || '').trim();
+if (!JWT_SECRET) {
+  JWT_SECRET = crypto.randomBytes(48).toString('hex');
+  try {
+    const envPath = path.join(__dirname, '.env');
+    let prefix = '';
+    if (fs.existsSync(envPath)) {
+      const cur = fs.readFileSync(envPath, 'utf8');
+      if (cur.length && !cur.endsWith('\n')) prefix = '\n'; // don't merge onto a prior line
+    }
+    fs.appendFileSync(envPath, `${prefix}JWT_SECRET=${JWT_SECRET}\n`);
+    console.log('[env] JWT_SECRET was missing — generated one and saved it to .env');
+  } catch (err) {
+    console.warn('[env] Could not persist JWT_SECRET to .env (using in-memory secret):', err.message);
+  }
+  process.env.JWT_SECRET = JWT_SECRET;
+}
+const JWT_EXPIRES_IN = '7d';
+
+// --- TossPayments keys ---
+// Client key → sent to the browser (public). Secret key → server-only, used to
+// call the confirm API with HTTP Basic auth. NEVER expose the secret to the
+// client. Falls back to Toss's public test keys so a fresh clone works offline.
 const TOSS_CLIENT_KEY = (process.env.TOSS_CLIENT_KEY || 'test_gck_docs_Ovk5rk1EwkEbP0W43n07xlzm').trim();
 const TOSS_SECRET_KEY = (process.env.TOSS_SECRET_KEY || 'test_gsk_docs_OaPz8L5KdmQXkzRz3y47BMw6').trim();
 const TOSS_CONFIRM_URL = 'https://api.tosspayments.com/v1/payments/confirm';
 
-// --- PostgreSQL (Supabase) data store ---
-const DATABASE_URL =
-  (process.env.DATABASE_URL ||
-    'postgresql://postgres.iwlstbwrhhtylkhiypwe:@aws-1-us-east-1.pooler.supabase.com:6543/postgres').trim();
+// --- Server-side price catalogue = the source of truth for money. ---
+// The client (index.html) has the full product data, but amounts must never be
+// trusted from the browser. We recompute every order total here by productId so
+// a tampered client price is caught before we ever ask Toss to charge a card.
+const PRICES = {
+  p1: 129000, p2: 148000, p3: 98000, p4: 112000, p5: 219000, p6: 189000,
+  p7: 69000, p8: 45000, p9: 175000, p10: 139000, p11: 165000, p12: 84000,
+};
+const FREE_SHIP_THRESHOLD = 50000;
+const SHIPPING_FEE = 3000;
 
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // Supabase 는 SSL 필요
-});
-
-// ==========================================================
-// 상품 카탈로그 — 가격의 "서버 측 진실의 원천"(Source of Truth).
-// 결제 승인 시 이 가격과 대조해 금액 위·변조를 차단한다.
-// ==========================================================
-const PRODUCTS = [
-  { id: 'tshirt',   name: '베이직 티셔츠',   price: 19000, emoji: '👕', desc: '부드러운 순면 100%' },
-  { id: 'sneakers', name: '데일리 스니커즈', price: 59000, emoji: '👟', desc: '가볍고 편한 데일리 슈즈' },
-  { id: 'cap',      name: '볼캡',           price: 25000, emoji: '🧢', desc: '자외선 차단 코튼 볼캡' },
-  { id: 'bag',      name: '캔버스 백팩',     price: 45000, emoji: '🎒', desc: '15인치 노트북 수납' },
-  { id: 'watch',    name: '미니멀 워치',     price: 89000, emoji: '⌚', desc: '스테인리스 메탈밴드' },
-  { id: 'coffee',   name: '스페셜티 원두',   price: 15000, emoji: '☕', desc: '핸드드립용 갓 볶은 200g' },
-];
-const productById = (id) => PRODUCTS.find((p) => p.id === id);
-
-// 시작 시 주문 테이블 보장
-async function initDb() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS shop_orders (
-      order_id    TEXT        PRIMARY KEY,
-      product_id  TEXT        NOT NULL,
-      order_name  TEXT        NOT NULL,
-      amount      BIGINT      NOT NULL,
-      status      TEXT        NOT NULL DEFAULT 'PENDING', -- PENDING | PAID | FAILED
-      payment_key TEXT,
-      method      TEXT,
-      receipt_url TEXT,
-      approved_at TIMESTAMPTZ,
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
+// Compute the authoritative total (items subtotal + shipping) from a cart.
+// Returns { cleanItems, amount } or throws on an unknown/empty cart.
+function priceCart(items) {
+  if (!Array.isArray(items) || items.length === 0) throw new Error('주문 항목이 비어 있습니다.');
+  const cleanItems = items.map((it) => {
+    const productId = it.productId ?? it.id ?? null;
+    const price = PRICES[productId];
+    if (price == null) throw new Error(`알 수 없는 상품입니다: ${productId}`);
+    return {
+      productId,
+      name: String(it.name ?? ''),
+      brand: String(it.brand ?? ''),
+      color: String(it.color ?? ''),
+      size: it.size ?? '',
+      qty: Math.max(1, parseInt(it.qty, 10) || 1),
+      price, // authoritative price from the server catalogue
+    };
+  });
+  const subtotal = cleanItems.reduce((s, it) => s + it.price * it.qty, 0);
+  const shipping = subtotal >= FREE_SHIP_THRESHOLD ? 0 : SHIPPING_FEE;
+  return { cleanItems, amount: subtotal + shipping };
 }
 
-// --- Middleware ---
-app.use(express.json());
-app.use(express.static(path.join(__dirname)));
-
-// --- API routes ---
-
-// 0) 공개 설정 (클라이언트 키 등) — 프론트가 하드코딩 대신 여기서 받아간다
-app.get('/api/config', (_req, res) => {
-  res.json({ success: true, data: { clientKey: TOSS_CLIENT_KEY } });
+// ============================================================================
+// 2. PostgreSQL pool (Supabase transaction pooler :6543 — SSL required)
+//    node-postgres uses *unnamed* prepared statements by default, which the
+//    transaction pooler handles fine. We only use plain parameterized
+//    query() calls (no named prepared statements).
+// ============================================================================
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+  max: 5,
+  connectionTimeoutMillis: 10000,
 });
+// A dropped idle client must not crash the process.
+pool.on('error', (err) => console.error('[pg] idle client error:', err.message));
 
-// 1) 상품 목록
-app.get('/api/products', (_req, res) => {
-  res.json({ success: true, data: PRODUCTS });
-});
-
-// 2) 주문 생성 — 서버가 상품 가격을 확정해 주문을 저장하고 orderId 를 발급한다.
-//    클라이언트가 보낸 금액은 신뢰하지 않는다.
-app.post('/api/orders', async (req, res) => {
+// ============================================================================
+// 3. Lazy table init (idempotent; safe for cold starts / concurrent requests)
+//    All tables are prefixed with `shop_`.
+// ============================================================================
+let dbInitialized = false;
+let initPromise = null;
+async function initDB() {
+  if (dbInitialized) return;
+  if (initPromise) return initPromise; // coalesce concurrent callers
+  initPromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS shop_users (
+        id            BIGSERIAL PRIMARY KEY,
+        email         TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        name          TEXT NOT NULL DEFAULT '',
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS shop_orders (
+        id           BIGSERIAL PRIMARY KEY,
+        user_id      BIGINT NOT NULL REFERENCES shop_users(id) ON DELETE CASCADE,
+        items        JSONB NOT NULL DEFAULT '[]'::jsonb,
+        total_amount BIGINT NOT NULL DEFAULT 0,
+        status       TEXT NOT NULL DEFAULT 'pending',
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    // Payment columns (added idempotently so existing deployments upgrade in place).
+    await pool.query(`
+      ALTER TABLE shop_orders
+        ADD COLUMN IF NOT EXISTS toss_order_id TEXT,
+        ADD COLUMN IF NOT EXISTS payment_key   TEXT,
+        ADD COLUMN IF NOT EXISTS method        TEXT,
+        ADD COLUMN IF NOT EXISTS receipt_url   TEXT,
+        ADD COLUMN IF NOT EXISTS approved_at   TIMESTAMPTZ;
+    `);
+    await pool.query(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_shop_orders_toss ON shop_orders (toss_order_id) WHERE toss_order_id IS NOT NULL;`
+    );
+    await pool.query(
+      `CREATE INDEX IF NOT EXISTS idx_shop_orders_user ON shop_orders (user_id, created_at DESC);`
+    );
+    dbInitialized = true;
+    console.log('[db] Tables ready: shop_users, shop_orders');
+  })();
   try {
-    const productId = (req.body && req.body.productId) || '';
-    const product = productById(productId);
-    if (!product) {
-      return res.status(400).json({ success: false, message: '존재하지 않는 상품입니다.' });
+    await initPromise;
+  } catch (err) {
+    initPromise = null; // allow a retry on the next request
+    throw err;
+  }
+}
+
+// ============================================================================
+// 4. App + middleware
+// ============================================================================
+const app = express();
+app.use(express.json({ limit: '1mb' }));
+
+// --- consistent response helpers ---
+const ok = (res, data, status = 200) => res.status(status).json({ success: true, data });
+const fail = (res, message, status = 400) => res.status(status).json({ success: false, message });
+
+const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, created_at: u.created_at });
+const signToken = (u) => jwt.sign({ sub: u.id, email: u.email }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Make sure the DB is initialized before any /api call (lazy init).
+app.use('/api', async (_req, res, next) => {
+  try {
+    await initDB();
+    next();
+  } catch (err) {
+    console.error('[db] init failed:', err.message);
+    fail(res, '데이터베이스 초기화에 실패했습니다.', 500);
+  }
+});
+
+// JWT auth guard — attaches req.user for protected routes.
+async function authRequired(req, res, next) {
+  try {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : null;
+    if (!token) return fail(res, '로그인이 필요합니다.', 401);
+
+    let payload;
+    try {
+      payload = jwt.verify(token, JWT_SECRET);
+    } catch {
+      return fail(res, '인증이 만료되었거나 올바르지 않습니다.', 401);
     }
 
-    // 추측 불가능한 고유 orderId (토스 권장: 6~64자)
-    const orderId = `order_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
-    const orderName = product.name;
-    const amount = product.price;
+    const { rows } = await pool.query(
+      'SELECT id, email, name, created_at FROM shop_users WHERE id = $1',
+      [payload.sub]
+    );
+    if (!rows[0]) return fail(res, '사용자를 찾을 수 없습니다.', 401);
+    req.user = rows[0];
+    next();
+  } catch (err) {
+    console.error('[auth] error:', err.message);
+    fail(res, '인증 처리 중 오류가 발생했습니다.', 500);
+  }
+}
 
-    await pool.query(
-      `INSERT INTO shop_orders (order_id, product_id, order_name, amount, status)
-       VALUES ($1, $2, $3, $4, 'PENDING')`,
-      [orderId, product.id, orderName, amount]
+// ============================================================================
+// 5. Auth routes
+// ============================================================================
+app.post('/api/auth/signup', async (req, res) => {
+  try {
+    let { email, password, name } = req.body || {};
+    email = String(email || '').trim().toLowerCase();
+    name = String(name || '').trim();
+
+    if (!EMAIL_RE.test(email)) return fail(res, '올바른 이메일을 입력해주세요.');
+    if (!password || String(password).length < 6) return fail(res, '비밀번호는 6자 이상이어야 합니다.');
+    if (!name) name = email.split('@')[0];
+
+    const dup = await pool.query('SELECT id FROM shop_users WHERE email = $1', [email]);
+    if (dup.rows[0]) return fail(res, '이미 가입된 이메일입니다.', 409);
+
+    const passwordHash = await bcrypt.hash(String(password), 10);
+    const { rows } = await pool.query(
+      'INSERT INTO shop_users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id, email, name, created_at',
+      [email, passwordHash, name]
+    );
+    const user = rows[0];
+    return ok(res, { token: signToken(user), user: publicUser(user) }, 201);
+  } catch (err) {
+    if (err.code === '23505') return fail(res, '이미 가입된 이메일입니다.', 409); // unique_violation race
+    console.error('[signup] error:', err.message);
+    return fail(res, '회원가입 처리 중 오류가 발생했습니다.', 500);
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    let { email, password } = req.body || {};
+    email = String(email || '').trim().toLowerCase();
+    if (!EMAIL_RE.test(email) || !password) return fail(res, '이메일과 비밀번호를 입력해주세요.');
+
+    const { rows } = await pool.query(
+      'SELECT id, email, name, password_hash, created_at FROM shop_users WHERE email = $1',
+      [email]
+    );
+    const user = rows[0];
+    // Same message whether the email is unknown or the password is wrong.
+    if (!user) return fail(res, '이메일 또는 비밀번호가 올바르지 않습니다.', 401);
+    const good = await bcrypt.compare(String(password), user.password_hash);
+    if (!good) return fail(res, '이메일 또는 비밀번호가 올바르지 않습니다.', 401);
+
+    return ok(res, { token: signToken(user), user: publicUser(user) });
+  } catch (err) {
+    console.error('[login] error:', err.message);
+    return fail(res, '로그인 처리 중 오류가 발생했습니다.', 500);
+  }
+});
+
+app.get('/api/auth/me', authRequired, (req, res) => ok(res, publicUser(req.user)));
+
+// ============================================================================
+// 6. Public config — the browser fetches the Toss *client* key from here
+//    instead of hardcoding it. (The secret key never leaves the server.)
+// ============================================================================
+app.get('/api/config', (_req, res) => ok(res, { tossClientKey: TOSS_CLIENT_KEY }));
+
+// ============================================================================
+// 7. Order / payment routes (protected)
+// ============================================================================
+// (7a) Create a PENDING order. The server prices the cart itself and mints a
+//      unique Toss orderId — this is the amount Toss will be told to charge and
+//      the amount we verify again at confirm time.
+app.post('/api/orders', authRequired, async (req, res) => {
+  try {
+    const { items } = req.body || {};
+
+    let priced;
+    try {
+      priced = priceCart(items); // { cleanItems, amount } — throws on bad input
+    } catch (e) {
+      return fail(res, e.message || '주문 항목이 올바르지 않습니다.');
+    }
+    const { cleanItems, amount } = priced;
+
+    // Unguessable, Toss-compatible order id (6–64 chars, [A-Za-z0-9_-]).
+    const tossOrderId = `sole_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
+    const first = cleanItems[0];
+    const orderName =
+      cleanItems.length > 1 ? `${first.name} 외 ${cleanItems.length - 1}건` : first.name || '주문';
+
+    // JSONB param must be a JSON *string* + ::jsonb cast.
+    const { rows } = await pool.query(
+      `INSERT INTO shop_orders (user_id, items, total_amount, status, toss_order_id)
+       VALUES ($1, $2::jsonb, $3, 'pending', $4)
+       RETURNING id, total_amount, created_at`,
+      [req.user.id, JSON.stringify(cleanItems), amount, tossOrderId]
     );
 
-    res.status(201).json({ success: true, data: { orderId, orderName, amount } });
+    return ok(res, { id: rows[0].id, tossOrderId, orderName, amount }, 201);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: '주문 생성에 실패했습니다.' });
+    console.error('[orders:create] error:', err.message);
+    return fail(res, '주문 생성 중 오류가 발생했습니다.', 500);
   }
 });
 
-// 3) 결제 승인 — successUrl 로 돌아온 paymentKey/orderId/amount 를 검증 후 토스 승인 API 호출.
-//    ⚠️ 반드시 서버에 저장된 주문 금액과 대조한다.
-app.post('/api/confirm', async (req, res) => {
+// (7b) Confirm payment. Toss redirects the browser back with paymentKey/orderId/
+//      amount; the client posts them here. We re-verify the amount against the
+//      stored order, then call Toss's confirm API with the SECRET key (Basic
+//      auth) — the only place a real charge is authorized. Idempotent on reload.
+app.post('/api/payments/confirm', authRequired, async (req, res) => {
   const { paymentKey, orderId, amount } = req.body || {};
-
   if (!paymentKey || !orderId || amount == null) {
-    return res.status(400).json({ success: false, message: '결제 정보가 올바르지 않습니다.' });
+    return fail(res, '결제 정보가 올바르지 않습니다.');
   }
 
   try {
-    // (1) 서버에 저장된 주문 조회
-    const { rows } = await pool.query('SELECT * FROM shop_orders WHERE order_id = $1', [orderId]);
+    const { rows } = await pool.query(
+      'SELECT * FROM shop_orders WHERE toss_order_id = $1',
+      [orderId]
+    );
     const order = rows[0];
-    if (!order) {
-      return res.status(404).json({ success: false, message: '주문을 찾을 수 없습니다.' });
+    if (!order) return fail(res, '주문을 찾을 수 없습니다.', 404);
+
+    // Only the owner may confirm their own order.
+    if (Number(order.user_id) !== Number(req.user.id)) {
+      return fail(res, '본인의 주문만 결제할 수 있습니다.', 403);
     }
 
-    // (2) 이미 승인된 주문이면 중복 승인 방지 (새로고침 대비)
-    if (order.status === 'PAID') {
-      return res.json({
-        success: true,
-        alreadyPaid: true,
-        data: {
-          orderId: order.order_id,
-          orderName: order.order_name,
-          amount: Number(order.amount),
-          method: order.method,
-          receiptUrl: order.receipt_url,
-          approvedAt: order.approved_at,
-        },
+    // Already paid (e.g. success page refreshed) → return the stored result.
+    if (order.status === 'paid') {
+      return ok(res, {
+        id: order.id, orderName: order.items?.[0]?.name || '주문',
+        amount: Number(order.total_amount), method: order.method,
+        receiptUrl: order.receipt_url, approvedAt: order.approved_at, alreadyPaid: true,
       });
     }
 
-    // (3) 금액 검증 — 클라이언트가 보낸 amount 가 서버 주문 금액과 정확히 일치해야 함
-    if (Number(amount) !== Number(order.amount)) {
-      await pool.query(`UPDATE shop_orders SET status = 'FAILED' WHERE order_id = $1`, [orderId]);
-      return res.status(400).json({
-        success: false,
-        message: '결제 금액이 주문 금액과 일치하지 않습니다.',
-      });
+    // Amount must match the server-priced total exactly.
+    if (Number(amount) !== Number(order.total_amount)) {
+      await pool.query(`UPDATE shop_orders SET status = 'failed' WHERE id = $1`, [order.id]);
+      return fail(res, '결제 금액이 주문 금액과 일치하지 않습니다.');
     }
 
-    // (4) 토스페이먼츠 승인 API 호출 (시크릿 키 Basic 인증)
-    const encodedKey = Buffer.from(`${TOSS_SECRET_KEY}:`).toString('base64');
+    // Server-to-server confirm with the secret key.
+    const basic = Buffer.from(`${TOSS_SECRET_KEY}:`).toString('base64');
     const tossResp = await fetch(TOSS_CONFIRM_URL, {
       method: 'POST',
-      headers: {
-        Authorization: `Basic ${encodedKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { Authorization: `Basic ${basic}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ paymentKey, orderId, amount: Number(amount) }),
     });
     const payment = await tossResp.json();
 
     if (!tossResp.ok) {
-      // 승인 실패 → 주문 실패 처리
-      await pool.query(`UPDATE shop_orders SET status = 'FAILED' WHERE order_id = $1`, [orderId]);
+      await pool.query(`UPDATE shop_orders SET status = 'failed' WHERE id = $1`, [order.id]);
       return res.status(tossResp.status).json({
-        success: false,
-        code: payment.code,
-        message: payment.message || '결제 승인에 실패했습니다.',
+        success: false, code: payment.code, message: payment.message || '결제 승인에 실패했습니다.',
       });
     }
 
-    // (5) 승인 성공 → 주문 상태 갱신
     const receiptUrl = payment.receipt ? payment.receipt.url : null;
-    await pool.query(
+    const { rows: updated } = await pool.query(
       `UPDATE shop_orders
-          SET status = 'PAID', payment_key = $2, method = $3, receipt_url = $4, approved_at = $5
-        WHERE order_id = $1`,
-      [orderId, paymentKey, payment.method || null, receiptUrl, payment.approvedAt || null]
+          SET status = 'paid', payment_key = $2, method = $3, receipt_url = $4, approved_at = $5
+        WHERE id = $1
+      RETURNING id, total_amount, method, receipt_url, approved_at, items`,
+      [order.id, paymentKey, payment.method || null, receiptUrl, payment.approvedAt || null]
     );
+    const o = updated[0];
 
-    res.json({
-      success: true,
-      data: {
-        orderId,
-        orderName: order.order_name,
-        amount: Number(amount),
-        method: payment.method,
-        receiptUrl,
-        approvedAt: payment.approvedAt,
-      },
+    return ok(res, {
+      id: o.id, orderName: o.items?.[0]?.name || '주문', amount: Number(o.total_amount),
+      method: o.method, receiptUrl: o.receipt_url, approvedAt: o.approved_at,
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: '결제 승인 처리 중 오류가 발생했습니다.' });
+    console.error('[payments:confirm] error:', err.message);
+    return fail(res, '결제 승인 처리 중 오류가 발생했습니다.', 500);
   }
 });
 
-// 4) 주문 상태 조회 (선택)
-app.get('/api/orders/:id', async (req, res) => {
+app.get('/api/orders', authRequired, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM shop_orders WHERE order_id = $1', [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ success: false, message: '주문을 찾을 수 없습니다.' });
-    const o = rows[0];
-    res.json({
-      success: true,
-      data: {
-        orderId: o.order_id, orderName: o.order_name, amount: Number(o.amount),
-        status: o.status, method: o.method, receiptUrl: o.receipt_url, approvedAt: o.approved_at,
-      },
-    });
+    // Only the signed-in user's *paid* orders — the payment history. The
+    // user_id filter is what enforces "본인 주문만" (권한 제어).
+    const { rows } = await pool.query(
+      `SELECT id, items, total_amount, status, method, receipt_url, approved_at, created_at
+       FROM shop_orders
+       WHERE user_id = $1 AND status = 'paid'
+       ORDER BY approved_at DESC NULLS LAST, id DESC`,
+      [req.user.id]
+    );
+    return ok(res, rows);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: '주문 조회에 실패했습니다.' });
+    console.error('[orders:list] error:', err.message);
+    return fail(res, '주문 내역을 불러오지 못했습니다.', 500);
   }
 });
 
-// --- Local start / Vercel export dual-mode ---
+// Unknown API route -> JSON 404 (registered before the SPA fallback).
+app.use('/api', (_req, res) => fail(res, '요청하신 API를 찾을 수 없습니다.', 404));
+
+// ============================================================================
+// 8. Static: serve the self-contained SPA.
+//    The app inlines all assets (base64 images) into index.html, so index.html
+//    is the only file the browser needs. We serve it explicitly rather than
+//    express.static(__dirname) so server.js / .env / package.json are never
+//    exposed over HTTP. Regex route works on both Express 4 and 5.
+// ============================================================================
+const INDEX_HTML = path.join(__dirname, 'index.html');
+app.get(/^\/(?!api(?:\/|$)).*/, (_req, res) => res.sendFile(INDEX_HTML));
+
+// ============================================================================
+// 9. Startup (local) / export (serverless)
+// ============================================================================
+async function start() {
+  try {
+    await initDB();
+    console.log('[db] Connected to PostgreSQL and initialized tables.');
+  } catch (err) {
+    console.error('[db] Initial connect/init failed (will retry lazily per request):', err.message);
+  }
+  app.listen(PORT, () => console.log(`SOLE shop server running → http://localhost:${PORT}`));
+}
+
 if (require.main === module) {
-  initDb()
-    .then(() => app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`)))
-    .catch((err) => {
-      console.error('DB 초기화 실패:', err.message);
-      process.exit(1);
-    });
-} else {
-  initDb().catch((err) => console.error('DB 초기화 실패:', err.message));
+  start();
 }
 module.exports = app;
