@@ -1,0 +1,13 @@
+{
+  "name": "my-cafe-sister-city",
+  "version": "1.0.0",
+  "description": "평택 자매도시 탐색기 — 세계지도 UI + Supabase",
+  "main": "single.js",
+  "scripts": {
+    "start": "node single.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}

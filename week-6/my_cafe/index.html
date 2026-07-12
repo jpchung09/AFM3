@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>평택 자매도시 탐색기 · Pyeongtaek Sister City Explorer</title>
+  <!-- CDN 버전 고정 (Option 1: 단일 index.html, React 18 + Tailwind + Babel + Leaflet) -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    :root { --font:'Apple SD Gothic Neo','Pretendard','Malgun Gothic',system-ui,sans-serif; }
+    html,body,#root { height:100%; margin:0; font-family:var(--font); }
+    #map { position:absolute; inset:0; z-index:0; background:#eaf1f6; }
+    .leaflet-container { font-family:var(--font); }
+    .mk { border-radius:9999px; border:2px solid #fff; box-shadow:0 2px 8px rgba(15,23,42,.35); transition:transform .15s; }
+    .mk:hover { transform:scale(1.25); }
+    .mk-pt { width:20px;height:20px; background:#e11d48; position:relative; }
+    .mk-pt::after { content:''; position:absolute; inset:-8px; border-radius:9999px; border:2px solid rgba(225,29,72,.5); animation:pulse 1.8s ease-out infinite; }
+    @keyframes pulse { 0%{transform:scale(.6);opacity:.9} 100%{transform:scale(1.8);opacity:0} }
+    .glass { background:rgba(255,255,255,.86); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); }
+    .panel-in { animation:slideIn .28s cubic-bezier(.16,1,.3,1); }
+    @keyframes slideIn { from{transform:translateX(24px);opacity:0} to{transform:none;opacity:1} }
+    ::-webkit-scrollbar{width:8px;height:8px}
+    ::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:9999px}
+    .leaflet-tooltip.city-tip{ background:#0f172a;color:#fff;border:none;border-radius:8px;font-weight:600;box-shadow:0 4px 12px rgba(0,0,0,.25);font-size:12px;padding:4px 8px; }
+    .leaflet-tooltip.city-tip::before{display:none}
+  </style>
+</head>
+<body class="bg-slate-100 overflow-hidden">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ===== 1) React Hooks =====
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ===== 2) 상수 & 데이터 =====
+    const PYEONGTAEK = { name_ko:'평택', name_en:'Pyeongtaek', lat:36.9921, lng:127.1129, flag:'🇰🇷' };
+    const TIER_COLOR = { strong:'#059669', good:'#2563eb', consider:'#d97706', not_recommended:'#9ca3af' };
+    const TIER_LABEL = { strong:'최우선 추천', good:'추천', consider:'신중 검토', not_recommended:'미추천' };
+    const HEAD_GRAD = {
+      strong:'linear-gradient(135deg,#047857,#10b981)', good:'linear-gradient(135deg,#1d4ed8,#3b82f6)',
+      consider:'linear-gradient(135deg,#b45309,#f59e0b)', not_recommended:'linear-gradient(135deg,#475569,#94a3b8)' };
+    const THEME = {
+      semiconductor:{ icon:'💠', label:'반도체' }, port_trade:{ icon:'⚓', label:'항만·무역' },
+      military:{ icon:'🎖️', label:'미군·안보' }, automotive:{ icon:'🚗', label:'자동차' },
+      planned_city:{ icon:'🏙️', label:'계획도시' }, agriculture:{ icon:'🌾', label:'농업' } };
+
+    // DB(/api/cities) 실패 시 사용하는 폴백 (single.js 시드와 동일)
+    const FALLBACK = [
+      { name_en:'Hsinchu', name_ko:'신주', country_en:'Taiwan', country_ko:'대만', flag:'🇹🇼', lat:24.8138, lng:120.9675, recommend:true, tier:'strong', theme:'semiconductor', tagline_ko:'TSMC 본사와 신주과학단지 — 세계 반도체의 발상지', commonalities_ko:'신주는 TSMC 본사와 UMC를 품은 신주과학단지의 도시로, 삼성 세계 최대 반도체 캠퍼스를 보유한 평택과 가장 직접적인 「반도체 대 반도체」 쌍입니다. 인재·협력사·유틸리티가 밀집한 클러스터 구조가 판박이입니다.', complements_ko:'파운드리 생태계 운영과 인재 양성(대학·ITRI 연계) 노하우로 평택 고덕 캠퍼스의 협력사 클러스터 고도화와 반도체 인력 교류에 벤치마크를 제공합니다.', why_not_ko:'' },
+      { name_en:'Dresden', name_ko:'드레스덴', country_en:'Germany', country_ko:'독일', flag:'🇩🇪', lat:51.0504, lng:13.7373, recommend:true, tier:'strong', theme:'semiconductor', tagline_ko:'「실리콘 작센」 — 유럽 최대 반도체 허브', commonalities_ko:'유럽 칩 3개 중 1개를 만드는 「실리콘 작센」의 중심으로 ESMC(TSMC 합작)·인피니온·글로벌파운드리 메가팹이 집결. 앵커 팹 중심 성장 구조가 삼성 축의 평택과 흡사합니다.', complements_ko:'유럽식 산학연 거버넌스와 EU 칩스법 연계 지원 모델을 갖춰, 평택이 국가 반도체 메가클러스터를 지역 차원에서 운영하는 데 참고가 됩니다.', why_not_ko:'' },
+      { name_en:'Eindhoven', name_ko:'에인트호번', country_en:'Netherlands', country_ko:'네덜란드', flag:'🇳🇱', lat:51.4416, lng:5.4697, recommend:true, tier:'strong', theme:'planned_city', tagline_ko:'ASML의 브레인포트 — 계획된 혁신 도시', commonalities_ko:'노광장비 독점기업 ASML을 축으로 한 「브레인포트」 혁신도시로, 반도체 밸류체인 핵심이자 지자체가 설계해 키우는 계획도시라는 점이 고덕신도시의 평택과 두 겹으로 맞물립니다.', complements_ko:'평택이 약한 「장비·소재」 축(ASML·협력사)을 보완하고, 도시-산업 통합개발(Project Beethoven) 경험은 고덕 정주여건 설계에 교훈을 줍니다.', why_not_ko:'' },
+      { name_en:'Hillsboro', name_ko:'힐즈버러', country_en:'United States', country_ko:'미국', flag:'🇺🇸', lat:45.5229, lng:-122.9898, recommend:true, tier:'strong', theme:'semiconductor', tagline_ko:'인텔 R&D의 심장 「실리콘 포레스트」', commonalities_ko:'인텔 18A 등 차세대 공정이 태어나는 세계 최고 수준 R&D 거점(D1X 팹). 대형 반도체 앵커가 도시 경제·수출을 좌우하는 구조가 평택과 닮았습니다.', complements_ko:'미국 내 반도체 R&D 중심지로 한·미 반도체 동맹을 지방 차원에서 상징적으로 연결. 「산업형」 미국 파트너로 포트폴리오를 넓힙니다.', why_not_ko:'' },
+      { name_en:'Bremerhaven', name_ko:'브레머하펜', country_en:'Germany', country_ko:'독일', flag:'🇩🇪', lat:53.5396, lng:8.5809, recommend:true, tier:'strong', theme:'automotive', tagline_ko:'유럽 최대 자동차 수출항 — 연 170만 대', commonalities_ko:'BLG가 운영하는 「유럽 최대 자동차 주차장」으로 연 약 170만 대를 처리(3/4 수출). 자동차 수출항 평택항 + KG모빌리티의 평택과 기능적으로 거의 동일합니다.', complements_ko:'완성차 로지스틱스·PDI·항만 자동화 세계 최정상급 노하우로 평택항 자동차 물류 고도화에 협력 가능. 유럽 자동차 네트워크의 창구입니다.', why_not_ko:'' },
+      { name_en:'Killeen', name_ko:'킬린', country_en:'United States', country_ko:'미국', flag:'🇺🇸', lat:31.1171, lng:-97.7278, recommend:true, tier:'good', theme:'military', tagline_ko:'포트 후드 — 미 본토 최대급 육군기지 도시', commonalities_ko:'미 본토 최대급 육군기지 포트 후드에 붙어 성장한 「군사 도시」로, 세계 최대 미 해외기지 캠프 험프리스를 품은 평택의 대칭점. 기지-도시 공존 과제가 공통됩니다.', complements_ko:'기지-도시 상생, 군인가족 정착, 기지 주변 경제 활성화 경험을 공유해 평택 도시행정에 벤치마크가 됩니다. 한미동맹 상징 스토리텔링 가치가 큽니다.', why_not_ko:'' },
+      { name_en:'Yokosuka', name_ko:'요코스카', country_en:'Japan', country_ko:'일본', flag:'🇯🇵', lat:35.2815, lng:139.6722, recommend:true, tier:'good', theme:'military', tagline_ko:'미 7함대 모항 + 조선·자동차 항구도시', commonalities_ko:'미 7함대 사령부가 있는 서태평양 최대 미 해군기지이자 항구·제조 도시. 「미군기지+항만+제조」 세 요소가 평택과 정확히 겹칩니다.', complements_ko:'기지와 항만·제조가 공존하는 도시경영, 기지 개방 이벤트 브랜딩 경험 공유. 한·일 지방 우호 + 안보 커뮤니티 교류의 이중 채널을 엽니다.', why_not_ko:'' },
+      { name_en:'Haiphong', name_ko:'하이퐁', country_en:'Vietnam', country_ko:'베트남', flag:'🇻🇳', lat:20.8449, lng:106.6881, recommend:true, tier:'good', theme:'port_trade', tagline_ko:'빈패스트를 품은 베트남 북부 항만·제조 성장도시', commonalities_ko:'베트남 북부 최대 항만도시이자 깟하이섬 빈패스트(VinFast) 전기차 공장으로 첨단 제조도시로 도약 중. 항만·자동차·급성장 키워드가 평택과 겹칩니다.', complements_ko:'동남아 생산·물류 거점으로 평택 기업 진출 교두보가 되고, 평택은 선진 산업 멘토로 상호보완. 단, 기존 베트남 우호도시(땀끼) 중복 확인 필요.', why_not_ko:'' },
+      { name_en:'Kitakyushu', name_ko:'기타큐슈', country_en:'Japan', country_ko:'일본', flag:'🇯🇵', lat:33.8835, lng:130.8752, recommend:true, tier:'consider', theme:'port_trade', tagline_ko:'철강 항만도시에서 「환경모델도시」로 전환', commonalities_ko:'규슈 최대 항만이자 철강·기계·화학 제조 도시로 공업항·제조 기반이 평택과 닮았고, 아시아로 열린 물류 관문이라는 점도 공통됩니다.', complements_ko:'에코타운·해상풍력 등 산업도시 친환경 전환을 선도해 평택 탄소중립·정주환경 전략에 참고. 다만 반도체·기지 정체성과의 접점은 약해 우선순위 중간.', why_not_ko:'' },
+      { name_en:'Chandler', name_ko:'챈들러', country_en:'United States', country_ko:'미국', flag:'🇺🇸', lat:33.3062, lng:-111.8413, recommend:false, tier:'not_recommended', theme:'semiconductor', tagline_ko:'인텔·TSMC 애리조나 — 강력하지만 힐즈버러와 중복', commonalities_ko:'인텔 팹52(18A 양산)와 TSMC 애리조나 팹이 있는 미국 반도체 양산 거점으로 반도체 정체성은 평택과 잘 맞습니다.', complements_ko:'고용량 양산 팹·사막 용수/전력 관리 노하우가 있으나 이미 추천한 힐즈버러(인텔 R&D)와 상당 부분 겹칩니다.', why_not_ko:'같은 미국·인텔 축으로 힐즈버러와 주제가 중복되어 포트폴리오 다양성을 해치고, 애리조나는 각국의 구애가 몰리는 과열 지역이라 상징성이 희석됩니다. 미국 반도체 축은 힐즈버러 한 곳으로 대표하는 편이 낫습니다.' },
+      { name_en:'Wolfsburg', name_ko:'볼프스부르크', country_en:'Germany', country_ko:'독일', flag:'🇩🇪', lat:52.4227, lng:10.7865, recommend:false, tier:'not_recommended', theme:'automotive', tagline_ko:'폭스바겐 기업도시 — 매력적이나 단일기업·내륙', commonalities_ko:'폭스바겐이 계획적으로 세운 「기업 도시」로 세계 최대급 완성차 공장을 품어 자동차 제조·계획도시 접점이 있습니다.', complements_ko:'완성차 대량생산·기업-도시 일체형 개발 경험이 있으나 항만이 없는 내륙 도시라 평택항 수출 축과 맞물리지 않습니다.', why_not_ko:'폭스바겐 단일기업 종속 구조라 다변화된 평택과 성격이 다르고, 항만이 없어 자동차 「수출항」 시너지가 없습니다. 자동차 축은 수출항이 겹치는 브레머하펜이 훨씬 적합합니다.' },
+      { name_en:'Yokohama', name_ko:'요코하마', country_en:'Japan', country_ko:'일본', flag:'🇯🇵', lat:35.4437, lng:139.6380, recommend:false, tier:'not_recommended', theme:'port_trade', tagline_ko:'거대 항만도시지만 규모 불균형·식상한 선택', commonalities_ko:'일본 대표 국제 무역항이자 제조·물류 중심으로 항만·교역이라는 표면적 접점은 있습니다.', complements_ko:'선진 항만·워터프런트 재개발 경험은 참고할 만하나 인구 370만 광역 대도시로 60만 평택과 체급 차이가 큽니다.', why_not_ko:'규모 차이가 커서 형식적 결연에 그치기 쉽고 한국 여러 도시가 이미 맺은 식상한 선택이라 차별성이 약합니다. 일본 파트너로는 정체성이 정확히 맞물리는 요코스카가 더 전략적입니다.' },
+    ];
+
+    // ===== 3) 지도 컴포넌트 (Leaflet 명령형 제어) =====
+    function MapView({ cities, onSelect, focus }) {
+      const elRef = useRef(null), mapRef = useRef(null), groupRef = useRef(null);
+
+      useEffect(() => {
+        const map = L.map(elRef.current, { worldCopyJump:true, minZoom:2, zoomControl:true }).setView([32, 40], 3);
+        mapRef.current = map;
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+          { subdomains:'abcd', attribution:'&copy; OpenStreetMap &copy; CARTO', maxZoom:19 }).addTo(map);
+        L.marker([PYEONGTAEK.lat, PYEONGTAEK.lng], { zIndexOffset:1000,
+          icon:L.divIcon({ className:'', html:'<div class="mk mk-pt"></div>', iconSize:[20,20], iconAnchor:[10,10] }) })
+          .addTo(map).bindTooltip('⭐ 평택 Pyeongtaek (기준 도시)', { className:'city-tip', direction:'top', offset:[0,-10] });
+        groupRef.current = L.layerGroup().addTo(map);
+        return () => map.remove();
+      }, []);
+
+      useEffect(() => {
+        const map = mapRef.current, group = groupRef.current;
+        if (!map || !group) return;
+        group.clearLayers();
+        cities.forEach((c) => {
+          if (c.recommend) L.polyline([[PYEONGTAEK.lat, PYEONGTAEK.lng],[c.lat, c.lng]],
+            { color:TIER_COLOR[c.tier], weight:1.6, opacity:.34, dashArray:'5 7' }).addTo(group);
+          const size = c.tier==='strong'?18 : c.tier==='not_recommended'?12 : 15;
+          const m = L.marker([c.lat, c.lng], {
+            icon:L.divIcon({ className:'', html:`<div class="mk" style="width:${size}px;height:${size}px;background:${TIER_COLOR[c.tier]}"></div>`, iconSize:[size,size], iconAnchor:[size/2,size/2] })
+          }).addTo(group);
+          m.bindTooltip(`${c.flag} ${c.name_ko} <span style="opacity:.7">${c.name_en}</span> · ${c.country_ko}`, { className:'city-tip', direction:'top', offset:[0,-8] });
+          m.on('click', () => onSelect(c));
+        });
+      }, [cities, onSelect]);
+
+      useEffect(() => {
+        if (focus && focus.city && mapRef.current) mapRef.current.flyTo([focus.city.lat, focus.city.lng], 5, { duration:.8 });
+      }, [focus]);
+
+      return <div ref={elRef} id="map" />;
+    }
+
+    // ===== 4) UI 컴포넌트 =====
+    function Header({ cities }) {
+      const rec = cities.filter(c=>c.recommend).length;
+      return (
+        <header className="absolute top-0 left-0 right-0 z-[500] pointer-events-none">
+          <div className="m-3 sm:m-4 flex items-center justify-between gap-3">
+            <div className="pointer-events-auto glass rounded-2xl px-4 py-2.5 shadow-lg border border-white/60">
+              <div className="flex items-center gap-2.5">
+                <span className="text-2xl">🗺️</span>
+                <div>
+                  <h1 className="text-[15px] sm:text-lg font-black text-slate-900 leading-tight">평택 자매도시 탐색기</h1>
+                  <p className="text-[11px] text-slate-500 leading-tight">Pyeongtaek Sister City Explorer · 지도를 클릭해 도시별 분석을 확인하세요</p>
+                </div>
+              </div>
+            </div>
+            <div className="pointer-events-auto glass rounded-2xl px-3 py-2 shadow-lg border border-white/60 hidden sm:block">
+              <div className="text-[11px] font-semibold text-slate-600">후보 {cities.length}곳 · <span className="text-emerald-600">추천 {rec}</span> · <span className="text-slate-400">미추천 {cities.length-rec}</span></div>
+            </div>
+          </div>
+        </header>
+      );
+    }
+
+    function CityList({ cities, selected, onPick }) {
+      return (
+        <aside className="absolute top-20 left-3 sm:left-4 z-[500] w-[258px] max-h-[calc(100vh-6.5rem)] flex flex-col">
+          <div className="glass rounded-2xl shadow-xl border border-white/60 overflow-hidden flex flex-col">
+            <div className="px-3.5 py-2.5 border-b border-slate-200/70 flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-700">후보 도시</span>
+              <span className="text-[10px] text-slate-400">{cities.length}곳</span>
+            </div>
+            <div className="overflow-y-auto p-2 space-y-1.5">
+              {cities.map((c,i) => (
+                <button key={i} onClick={() => onPick(c)}
+                  className={`w-full text-left rounded-xl px-2.5 py-2 transition flex items-center gap-2.5 ${selected&&selected.name_en===c.name_en?'bg-slate-900 text-white':'hover:bg-slate-100 text-slate-800'}`}
+                  style={{ borderLeft:`3px solid ${TIER_COLOR[c.tier]}` }}>
+                  <span className="text-lg">{c.flag}</span>
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-[13px] font-bold truncate">{c.name_ko} <span className={selected&&selected.name_en===c.name_en?'text-slate-300 font-normal':'text-slate-400 font-normal'}>{c.name_en}</span></span>
+                    <span className={`block text-[11px] truncate ${selected&&selected.name_en===c.name_en?'text-slate-300':'text-slate-500'}`}>{THEME[c.theme]?.icon} {c.country_ko} · {TIER_LABEL[c.tier]}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </aside>
+      );
+    }
+
+    function Legend() {
+      const items = [['#e11d48','평택 (기준 도시)'],['#059669','최우선 추천'],['#2563eb','추천'],['#d97706','신중 검토'],['#9ca3af','미추천']];
+      return (
+        <div className="absolute bottom-3 left-3 sm:left-4 z-[500] glass rounded-xl shadow-lg border border-white/60 px-3 py-2.5">
+          <div className="text-[10px] font-bold text-slate-500 mb-1.5 uppercase tracking-wide">범례</div>
+          <div className="space-y-1 text-[11px] text-slate-700">
+            {items.map(([c,l]) => <div key={l} className="flex items-center gap-2"><span className="w-3 h-3 rounded-full" style={{background:c}}></span> {l}</div>)}
+          </div>
+        </div>
+      );
+    }
+
+    function DetailPanel({ city, onClose }) {
+      if (!city) return null;
+      const th = THEME[city.theme];
+      return (
+        <section className="absolute top-20 right-3 sm:right-4 z-[600] w-[332px] max-w-[calc(100vw-1.5rem)]">
+          <div className="glass rounded-2xl shadow-2xl border border-white/60 overflow-hidden panel-in">
+            <div className="p-4 text-white relative" style={{ background:HEAD_GRAD[city.tier] }}>
+              <button onClick={onClose} className="absolute top-3 right-3 w-7 h-7 grid place-items-center rounded-full bg-white/20 hover:bg-white/30 text-sm">✕</button>
+              <div className="text-4xl mb-1">{city.flag}</div>
+              <h2 className="text-xl font-black leading-tight">{city.name_ko} <span className="text-base font-bold opacity-80">{city.name_en}</span></h2>
+              <p className="text-sm opacity-90">{city.country_ko} · {city.country_en}</p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-white/25">{city.recommend? '✓ '+TIER_LABEL[city.tier] : '✕ 미추천'}</span>
+                {th && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-white/25">{th.icon} {th.label}</span>}
+              </div>
+            </div>
+            <div className="p-4 space-y-3.5 max-h-[calc(100vh-16rem)] overflow-y-auto">
+              {city.tagline_ko && <p className="text-sm font-semibold text-slate-800 italic">“{city.tagline_ko}”</p>}
+              <div>
+                <div className="text-xs font-bold text-emerald-700 mb-1">🤝 공통점</div>
+                <p className="text-[13px] leading-relaxed text-slate-700">{city.commonalities_ko}</p>
+              </div>
+              <div>
+                <div className="text-xs font-bold text-blue-700 mb-1">🧩 보완점</div>
+                <p className="text-[13px] leading-relaxed text-slate-700">{city.complements_ko}</p>
+              </div>
+              {city.why_not_ko && city.why_not_ko.trim() && (
+                <div className="rounded-xl bg-rose-50 border border-rose-100 p-3">
+                  <div className="text-xs font-bold text-rose-700 mb-1">⚠️ 추천하지 않는 이유</div>
+                  <p className="text-[13px] leading-relaxed text-rose-800">{city.why_not_ko}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      );
+    }
+
+    // ===== 5) App =====
+    function App() {
+      const [cities, setCities] = useState(null);
+      const [selected, setSelected] = useState(null);
+      const [focus, setFocus] = useState(null);
+
+      useEffect(() => {
+        fetch('/api/cities').then(r=>r.json())
+          .then(j => setCities(j && j.success && Array.isArray(j.data) && j.data.length ? j.data : FALLBACK))
+          .catch(() => setCities(FALLBACK));
+      }, []);
+
+      const onSelect = useCallback((c) => setSelected(c), []);
+      const onPick = useCallback((c) => { setSelected(c); setFocus({ city:c, n:(focus?focus.n:0)+1 }); }, [focus]);
+
+      if (!cities) return <div className="h-full grid place-items-center text-slate-400 text-sm">지도를 불러오는 중…</div>;
+
+      return (
+        <div className="h-full relative">
+          <MapView cities={cities} onSelect={onSelect} focus={focus} />
+          <Header cities={cities} />
+          <CityList cities={cities} selected={selected} onPick={onPick} />
+          <Legend />
+          <DetailPanel city={selected} onClose={() => setSelected(null)} />
+        </div>
+      );
+    }
+
+    // ===== 6) Rendering =====
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
